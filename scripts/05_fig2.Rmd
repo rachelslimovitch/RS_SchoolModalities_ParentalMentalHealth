@@ -1,0 +1,580 @@
+---
+title: "Untitled"
+author: "Rachel Slimovitch"
+date: "2025-11-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/05a_fig2.Rmd")
+```
+
+
+# Dataset: Dec, April
+Need one dataset for Dec (Dec1-Dec23), one for April 
+```{r}
+# read in data
+data = fread(here("RS_Thesis_Data", "data_analytic_prek12.csv"))
+names(data) <- make.names(names(data), unique = TRUE)
+
+#remove space, financial
+data$financial_worry<- gsub(" worried", "worried", data$financial_worry)
+#remove space, covid
+data$worried_covid<- gsub(" worried", "worried", data$worried_covid)
+data$worried_covid<- gsub(" at", "at", data$worried_covid)
+data$worried_covid<- gsub(" all", "all", data$worried_covid)
+#remove spacing, quartile white
+data$quartile_white<- gsub(" quartile", "quartile", data$quartile_white)
+```
+
+Filter out hybrid learning (looking at remote --> in-person)
+```{r}
+data5<- data %>%
+  filter(modality_part_time_1_0=="0") %>%
+  mutate(modality_in_person_1_0=as.integer(modality_in_person_1_0)) %>%
+  filter(!is.na(REGION)) 
+
+#Dec- 196,076
+data5_dec<- data5 %>%
+  filter(date >= "2020-12-01" & date<= "2020-12-23")
+
+svy_dec<- svydesign(ids = ~1, weights = ~weight, data = data5_dec) 
+
+#April- 154,190
+data5_april<- data5 %>%
+  filter(date >= "2021-04-01" & date< "2021-05-01") 
+
+svy_april<- svydesign(ids = ~1, weights = ~weight, data = data5_april) 
+
+```
+
+## Associations (LPM)
+Functions
+(Call for each region, for each month)
+```{r}
+# Reference
+fig2_associational_ref<- function(outcome,interaction_term, coef, design_name, name) {
+  #fit model
+  formula <- as.formula(paste(outcome, "~", paste(interaction_term, "+"), paste(coef, collapse = " + ")))
+  model_svy <- svyglm(formula, design = design_name)
+  #get confint
+  lb<- round(confint(model_svy)["modality_in_person_1_0",1],6)*100 #lower bound
+  ub<- round(confint(model_svy)["modality_in_person_1_0",2],6)*100 #lower bound
+  #return
+  results <- data.table(
+    variable = name,
+    mean = (lb + ub) / 2,
+    ub_estimate = ub,
+    lb_estimate = lb
+  )
+  return(results)
+}
+
+
+# Non-reference
+fig2_associational_nonref<- function(outcome,interaction_term, coef, design_name, subgroup, name) {
+  #fit model
+  formula <- as.formula(paste(outcome, "~", paste(interaction_term, "+"), paste(coef, collapse = " + ")))
+  model_svy <- svyglm(formula, design = design_name)
+  #get confint
+  hypothesis <- paste0("modality_in_person_1_0 + modality_in_person_1_0:", subgroup, " = 0")
+  mod_summary<-summary(
+    glht(model_svy, linfct = hypothesis))
+  lb<- round(confint(mod_summary)$confint[2],6)*100
+  ub<- round(confint(mod_summary)$confint[3],6)*100
+  #return
+  results <- data.table(
+    variable = name,
+    mean = (lb + ub) / 2,
+    ub_estimate = ub,
+    lb_estimate = lb
+  )
+  return(results)
+}
+
+# For national data (not by region)
+fig2_associational<- function(outcome, coef, design_name, name) {
+  #fit model
+  formula <- as.formula(paste(outcome, "~", paste(coef, collapse = " + ")))
+  model_svy <- svyglm(formula, design = design_name)
+  #get confint#get confint#get confint
+  lb<- round(confint(model_svy)["modality_in_person_1_0",1],6)*100 #lower bound
+  ub<- round(confint(model_svy)["modality_in_person_1_0",2],6)*100 #lower bound
+  #return
+  results <- data.table(
+    variable = name,
+    mean = (lb + ub) / 2,
+    ub_estimate = ub,
+    lb_estimate = lb
+  )
+  return(results)
+}
+
+```
+
+## IPW
+Function:
+```{r}
+fig2_ipw<- function(data, coef_ipw, outcome_var, name) {
+  # Step 1: create survey design object
+  data_svy <- svydesign(ids = ~1, weights = ~weight, data = data)
+  # Step 2: run ps model
+  formula_str <- paste("modality_in_person_1_0 ~", paste(coef_ipw, collapse = " + "))
+  ps_model <- svyglm(as.formula(formula_str), design = data_svy, family = "binomial")
+  
+  #Step 3: calculate ps
+  data_ipw<- data %>%
+    mutate(ps = predict(ps_model, type="response"))
+  
+  #Step 4: Remove non-overlapping
+  data_overlap <- data_ipw %>%
+    filter(ps >= min(data_ipw$ps[data_ipw$modality_in_person_1_0 == 1]) & 
+             ps <= max(data_ipw$ps[data_ipw$modality_in_person_1_0 == 1]))
+  num <- nrow(data_ipw) - nrow(data_overlap)
+  
+  #Step 5: Create IPW*survey weight
+  data_overlap2 <- data_overlap %>%
+    mutate(ipw = ifelse(data_overlap$modality_in_person_1_0 == 1, 1 / ps, 1 / (1 - ps))) %>%
+    mutate(ipw_surveywt = ipw * data_overlap$weight)
+  
+  #Step 6: Create survey design for outcome
+  svy_outcome <- svydesign(ids = ~1, weights = ~ipw_surveywt, data = data_overlap2)
+  
+  #Step 7: run outcome
+  formula_outcome <- paste(outcome_var,paste("~ modality_in_person_1_0 +"), paste(coef_ipw, collapse = " + "))
+  outcome_ipw<- svyglm(as.formula(formula_outcome), design = svy_outcome)
+  #Step 8: confint
+  lb<- round(confint(outcome_ipw)["modality_in_person_1_0",1],6)*100 #lower bound
+  ub<- round(confint(outcome_ipw)["modality_in_person_1_0",2],6)*100 #lower bound
+  #return
+  results <- data.table(
+    variable = name,
+    mean = (lb + ub) / 2,
+    ub_estimate = ub,
+    lb_estimate = lb
+  )
+  return(results)
+}
+
+```
+
+# Overall fcn
+Create function that passes in outcome, design_name, column name. Returns a dataframe with variables and CI's.
+```{r}
+ci_data_fcn<- function(outcome, coef1, coef_worry, coef_ipw, design_name, date, data_ipw) {
+  #overall, associational
+  overall_assoc<- fig2_associational(outcome, coef1,
+                                 design_name, name=paste("inperson",date))
+  #overall, IPW
+  overall_ipw<- fig2_ipw(data_ipw, coef_ipw, outcome,
+                     name=paste("ipw",date))
+  #gender
+  male<- fig2_associational_nonref(outcome, interaction_term= "modality_in_person_1_0*gender", coef1,
+                                     design_name, subgroup="genderMale", 
+                                     name=paste("male",date))
+  female<- fig2_associational_ref(outcome, interaction_term= "modality_in_person_1_0*gender", coef1,
+                                     design_name, name=paste("female", date))
+  #covid-19 concern
+  worriedcovid_notworried<-fig2_associational_nonref(outcome, interaction_term= "modality_in_person_1_0*worried_covid", coef_worry,
+                                                 design_name, subgroup="worried_covidNotworriedatall", name=paste("covid_notworried",date))
+  worriedcovid_veryworried<- fig2_associational_nonref(outcome, interaction_term= "modality_in_person_1_0*worried_covid", coef_worry,
+                                                      design_name, subgroup="worried_covidVeryworried", 
+                                     name=paste("covid_veryworried", date))
+
+  #merge
+  all_data<-rbind(overall_assoc, overall_ipw,
+                  male, female,
+                  worriedcovid_notworried, worriedcovid_veryworried)
+}
+```
+
+Write function that returns a list of 3 dfs: (anx, dep, isol)
+```{r}
+
+fig2_function<- function(design_name1, design_name2, date1, date2, data_ipw1, data_ipw2, coef, coef_worry, coef_ipw) {
+  #Date 1
+  ci_date1_anxiety<- ci_data_fcn(outcome="anxiety_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name1, date=date1, data_ipw=data_ipw1)
+  
+  ci_date1_depression<- ci_data_fcn(outcome="depression_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name1, date=date1, data_ipw=data_ipw1)
+  
+  ci_date1_isolation<- ci_data_fcn(outcome="isolation_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name1, date=date1, data_ipw=data_ipw1)
+  
+  #Date 2
+  ci_date2_anxiety<- ci_data_fcn(outcome="anxiety_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name2, date=date2, data_ipw=data_ipw2)
+  
+  ci_date2_depression<- ci_data_fcn(outcome="depression_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name2, date=date2, data_ipw=data_ipw2)
+  
+  ci_date2_isolation<- ci_data_fcn(outcome="isolation_binary", coef, coef_worry, coef_ipw,
+                               design_name=design_name2, date=date2, data_ipw=data_ipw2)
+  
+  #Combine
+  result_list <- list(ci_anxiety = cbind(ci_date1_anxiety, ci_date2_anxiety),
+                      ci_depression = cbind(ci_date1_depression, ci_date2_depression),
+                      ci_isolation = cbind(ci_date1_isolation, ci_date2_isolation))
+  
+  # Return the list
+  return(result_list)
+}
+
+
+```
+
+# Call fcns
+
+## Coef lists
+```{r}
+# United States
+v3_us_fig2<- c("modality_in_person_1_0", "modality_part_time_1_0", "REGION",
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat", "child_cat","worried_covid", 
+              "avoid_contact", "comorbid")
+
+v3_us_fig2_covidworry<- c("modality_in_person_1_0", "modality_part_time_1_0","REGION", 
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat", "child_cat","worried_covid")
+
+v3_simple_ipw<- c("REGION", "urban_rural", "gender", "age", "quartile_white", "financial_worry",
+                  "education_level", "employment", "adult_cat", "child_cat","worried_covid",
+                  "avoid_contact", "comorbid")
+
+# by region
+v3_stratifiedregion_fig2<-c("modality_in_person_1_0", "modality_part_time_1_0",
+                            "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", 
+                            "quartile_hisp_latino","financial_worry", "education_level", "employment", 
+                            "adult_cat", "child_cat","worried_covid","avoid_contact", "comorbid")
+
+v3_stratifiedregion_fig2_covidworry<-c("modality_in_person_1_0", "modality_part_time_1_0", 
+                            "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", 
+                            "quartile_hisp_latino","financial_worry", "education_level", "employment", 
+                            "adult_cat", "child_cat","worried_covid")
+
+v3_simple_ipw_stratified<- c("urban_rural", "gender", "age", "financial_worry", 
+                  "education_level", "employment", "adult_cat", "child_cat","worried_covid",
+                  "avoid_contact", "comorbid")
+
+            
+```
+
+## US
+```{r}
+#US: Dec/April
+dec_april_us_fig2<- fig2_function(svy_dec, svy_april, "dec", "_april", data5_dec, data5_april, v3_us_fig2, v3_us_fig2_covidworry, v3_simple_ipw)
+anx_us<-as.data.frame(dec_april_us_fig2[1]) 
+dep_us<-as.data.frame(dec_april_us_fig2[2])
+isol_us<-as.data.frame(dec_april_us_fig2[3])
+
+```
+
+## South
+```{r}
+data5_dec_south<- data5_dec %>%
+  filter(REGION=="South")
+
+data5_april_south<- data5_april %>%
+  filter(REGION=="South")
+
+svy_dec_south<- svydesign(ids = ~1, weights = ~weight, data = data5_dec_south)
+svy_april_south<- svydesign(ids = ~1, weights = ~weight, data = data5_april_south)
+
+#Fcn
+dec_april_south_fig2<- fig2_function(svy_dec_south, svy_april_south, "dec", "_april", 
+                                     data5_dec_south, data5_april_south, v3_stratifiedregion_fig2, v3_stratifiedregion_fig2_covidworry, v3_simple_ipw_stratified)
+
+
+anx_south<-as.data.frame(dec_april_south_fig2[1])
+dep_south<-as.data.frame(dec_april_south_fig2[2])
+isol_south<-as.data.frame(dec_april_south_fig2[3])
+```
+
+## Northeast
+```{r}
+data5_dec_northeast<- data5_dec %>%
+  filter(REGION=="Northeast")
+
+data5_april_northeast<- data5_april %>%
+  filter(REGION=="Northeast")
+
+svy_dec_northeast<- svydesign(ids = ~1, weights = ~weight, data = data5_dec_northeast)
+svy_april_northeast<- svydesign(ids = ~1, weights = ~weight, data = data5_april_northeast)
+
+
+#Fcn
+dec_april_northeast_fig2<- fig2_function(svy_dec_northeast, svy_april_northeast, "dec", "_april", 
+                                     data5_dec_northeast, data5_april_northeast, v3_stratifiedregion_fig2, v3_stratifiedregion_fig2_covidworry, v3_simple_ipw_stratified)
+
+anx_northeast<-as.data.frame(dec_april_northeast_fig2[1])
+dep_northeast<-as.data.frame(dec_april_northeast_fig2[2])
+isol_northeast<-as.data.frame(dec_april_northeast_fig2[3])
+```
+
+## West
+```{r}
+data5_dec_west<- data5_dec %>%
+  filter(REGION=="West")
+
+data5_april_west<- data5_april %>%
+  filter(REGION=="West")
+
+svy_dec_west<- svydesign(ids = ~1, weights = ~weight, data = data5_dec_west)
+svy_april_west<- svydesign(ids = ~1, weights = ~weight, data = data5_april_west)
+
+
+#Fcn
+dec_april_west_fig2<- fig2_function(svy_dec_west, svy_april_west, "dec", "_april", 
+                                     data5_dec_west, data5_april_west, v3_stratifiedregion_fig2, v3_stratifiedregion_fig2_covidworry, v3_simple_ipw_stratified)
+
+
+anx_west<-as.data.frame(dec_april_west_fig2[1])
+dep_west<-as.data.frame(dec_april_west_fig2[2])
+isol_west<-as.data.frame(dec_april_west_fig2[3])
+```
+
+## Midwest
+```{r}
+data5_dec_midwest<- data5_dec %>%
+  filter(REGION=="Midwest")
+
+data5_april_midwest<- data5_april %>%
+  filter(REGION=="Midwest")
+
+svy_dec_midwest<- svydesign(ids = ~1, weights = ~weight, data = data5_dec_midwest)
+svy_april_midwest<- svydesign(ids = ~1, weights = ~weight, data = data5_april_midwest)
+
+
+#Fcn
+dec_april_midwest_fig2<- fig2_function(svy_dec_midwest, svy_april_midwest, "dec", "_april", 
+                                     data5_dec_midwest, data5_april_midwest, v3_stratifiedregion_fig2, v3_stratifiedregion_fig2_covidworry, v3_simple_ipw_stratified)
+
+
+anx_midwest<-as.data.frame(dec_april_midwest_fig2[1])
+dep_midwest<-as.data.frame(dec_april_midwest_fig2[2])
+isol_midwest<-as.data.frame(dec_april_midwest_fig2[3])
+```
+
+# Combine to a plot
+Facet by MH outcome and region.
+```{r}
+#function to rearrange dataset
+fig2_rearrange_regions<- function(data, outcome, reg) {
+  #var names
+  variable_names_gr1 <- paste("ci_", outcome, c(".variable", ".mean", ".ub_estimate", ".lb_estimate"), sep = "")
+  variable_names_gr2 <- paste("ci_", outcome, c(".variable.1", ".mean.1", ".ub_estimate.1", ".lb_estimate.1"), sep = "")
+  
+  #group 1
+  gr1<-data %>%
+    dplyr::select(all_of(variable_names_gr1)) %>%
+    rename(
+      var = !!sym(paste("ci_", outcome, ".variable", sep = "")),
+      mean = !!sym(paste("ci_", outcome, ".mean", sep = "")),
+      ub = !!sym(paste("ci_", outcome, ".ub_estimate", sep = "")),
+      lb = !!sym(paste("ci_", outcome, ".lb_estimate", sep = "")))%>%
+  mutate(date="December 2020")
+  
+  #gr2
+  gr2<-data %>%
+    dplyr::select(all_of(variable_names_gr2)) %>%
+    rename(
+      var = !!sym(paste("ci_", outcome, ".variable.1", sep = "")),
+      mean = !!sym(paste("ci_", outcome, ".mean.1", sep = "")),
+      ub = !!sym(paste("ci_", outcome, ".ub_estimate.1", sep = "")),
+      lb = !!sym(paste("ci_", outcome, ".lb_estimate.1", sep = "")))%>%
+  mutate(date="April 2021")
+  
+  #combine
+  data_final<- rbind(gr1, gr2) %>%
+    mutate(region=reg, mh=outcome)
+  data_final$var<- gsub(" _april", "", data_final$var)
+  data_final$var<- gsub(" dec", "", data_final$var)
+  data_final<- data_final %>%
+  filter(var!="ipw", var !="inperson")
+  data_final$var <- factor(data_final$var, 
+                                levels = c("male", "female", "covid_notworried", "covid_veryworried"))
+  data_final$date <- factor(data_final$date, 
+                                levels = c("December 2020", "April 2021"))
+  data_final$mh <- factor(data_final$mh, levels = c("isolation", "anxiety", "depression"), 
+                          labels = c("Isolation", "Anxiety", "Depression"))
+  
+  #return
+  return(data_final)
+}
+
+#south
+isol_south_final<- fig2_rearrange_regions(isol_south, "isolation", "South")
+anx_south_final<- fig2_rearrange_regions(anx_south, "anxiety", "South")
+dep_south_final<- fig2_rearrange_regions(dep_south, "depression", "South")
+
+#northeast
+isol_northeast_final<- fig2_rearrange_regions(isol_northeast, "isolation", "Northeast")
+anx_northeast_final<- fig2_rearrange_regions(anx_northeast, "anxiety", "Northeast")
+dep_northeast_final<- fig2_rearrange_regions(dep_northeast, "depression", "Northeast")
+
+#west
+isol_west_final<- fig2_rearrange_regions(isol_west, "isolation", "West")
+anx_west_final<- fig2_rearrange_regions(anx_west, "anxiety", "West")
+dep_west_final<- fig2_rearrange_regions(dep_west, "depression", "West")
+
+#midwest
+isol_midwest_final<- fig2_rearrange_regions(isol_midwest, "isolation", "Midwest")
+anx_midwest_final<- fig2_rearrange_regions(anx_midwest, "anxiety", "Midwest")
+dep_midwest_final<- fig2_rearrange_regions(dep_midwest, "depression", "Midwest")
+
+
+#combine
+fig2_final_regions<- rbind(isol_south_final, anx_south_final, dep_south_final,
+                           isol_northeast_final, anx_northeast_final, dep_northeast_final,
+                           isol_west_final, anx_west_final, dep_west_final,
+                           isol_midwest_final, anx_midwest_final, dep_midwest_final)
+```
+
+For entire US:
+```{r}
+#function to rearrange dataset
+fig2_rearrange_us<- function(data, outcome) {
+  #var names
+  variable_names_gr1 <- paste("ci_", outcome, c(".variable", ".mean", ".ub_estimate", ".lb_estimate"), sep = "")
+  variable_names_gr2 <- paste("ci_", outcome, c(".variable.1", ".mean.1", ".ub_estimate.1", ".lb_estimate.1"), sep = "")
+
+  #group 1
+  gr1<-data %>%
+    dplyr::select(all_of(variable_names_gr1)) %>%
+    rename(
+      var = !!sym(paste("ci_", outcome, ".variable", sep = "")),
+      mean = !!sym(paste("ci_", outcome, ".mean", sep = "")),
+      ub = !!sym(paste("ci_", outcome, ".ub_estimate", sep = "")),
+      lb = !!sym(paste("ci_", outcome, ".lb_estimate", sep = "")))%>%
+  mutate(date="December 2020")
+  
+  #gr2
+  gr2<-data %>%
+    dplyr::select(all_of(variable_names_gr2)) %>%
+    rename(
+      var = !!sym(paste("ci_", outcome, ".variable.1", sep = "")),
+      mean = !!sym(paste("ci_", outcome, ".mean.1", sep = "")),
+      ub = !!sym(paste("ci_", outcome, ".ub_estimate.1", sep = "")),
+      lb = !!sym(paste("ci_", outcome, ".lb_estimate.1", sep = "")))%>%
+  mutate(date="April 2021")
+  
+  #combine
+  data_final<- rbind(gr1, gr2) %>%
+    mutate(region="United States", mh=outcome)
+  data_final$var<- gsub(" _april", "", data_final$var)
+  data_final$var<- gsub(" dec", "", data_final$var)
+  data_final$var <- factor(data_final$var, 
+                                levels = c("inperson", "ipw", "male", "female", "covid_notworried", "covid_veryworried"))
+  data_final$date <- factor(data_final$date, 
+                                levels = c("December 2020", "April 2021"))
+  data_final$mh <- factor(data_final$mh, levels = c("isolation", "anxiety", "depression"), 
+                          labels = c("Isolation", "Anxiety", "Depression"))
+  
+  #return
+  return(data_final)
+}
+
+anx_us_final<-fig2_rearrange_us(anx_us, "anxiety")
+dep_us_final<-fig2_rearrange_us(dep_us, "depression")
+isol_us_final<-fig2_rearrange_us(isol_us, "isolation")
+
+fig2_us<- rbind(anx_us_final, dep_us_final, isol_us_final)
+```
+
+Combine data:
+```{r}
+x_labels_region <- c("male" = "Male",
+              "female" = "Female",
+              "covid_notworried" = "Low\nconcern",
+              "covid_veryworried" = "High\nconcern")
+
+# Plot regions
+regions_fig2<- 
+  ggplot(fig2_final_regions, aes(x = var, y = mean, color = date)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size=0.3) +  # Add dotted black line at y=0
+  geom_point(position = position_dodge(width =.5), size=0.9) + # Increase the width for more spacing
+  geom_errorbar(
+    aes(ymin = lb, ymax = ub),
+    width=0.2,
+    size=0.3,
+    position = position_dodge(width =.5)# Adjust according to the width used in geom_point
+  ) +
+  theme_minimal() +
+  labs(color = "Date") +
+  scale_x_discrete(labels = x_labels_region) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 7),  # Increase x-axis text size
+        axis.text.y = element_text(size = 7),  # Increase y-axis text size
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        panel.border = element_blank(),  # Remove panel border
+        axis.line.x = element_line(color = "black", size = .2),  # Add x-axis line
+        axis.line.y = element_line(color = "black", size = .2),
+        axis.ticks.y = element_line(color = "black", size = 0.2)) +
+      #  legend.text = element_text(size = 12)) +  # Add y-axis line 
+  facet_grid(region ~ mh)
+
+ggsave("/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_TablesFigures/regions_fig2.png", plot = regions_fig2, width = 10, height = 5, dpi = 300)  # Adjust width, height, and dpi as needed
+```
+
+Plot US:
+```{r}
+#plot
+x_labels_us <- c("inperson" = "LPM",
+                     "ipw" = "IPW",
+                     "male" = "Male",
+              "female" = "Female",
+              "covid_notworried" = "Low\nconcern",
+              "covid_veryworried" = "High\nconcern")
+
+
+# Plot
+us_fig2<- 
+  ggplot(fig2_us, aes(x = var, y = mean, color = date)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size=0.3) +  # Change linetype to "dashed"
+  geom_point(position = position_dodge(width =.5), size=0.9) + # Increase the width for more spacing
+  geom_errorbar(
+    aes(ymin = lb, ymax = ub),
+    width=0.2,
+    size=0.3,
+    position = position_dodge(width =.5)# Adjust according to the width used in geom_point
+  ) +
+  theme_minimal() +
+  labs(color = "Date") +
+  scale_x_discrete(labels = x_labels_us) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(size = 7),  # Increase x-axis text size
+        axis.text.y = element_text(size = 7),  # Increase y-axis text size
+        panel.grid.major = element_blank(),  # Remove major gridlines
+        panel.grid.minor = element_blank(),  # Remove minor gridlines
+        panel.border = element_blank(),  # Remove panel border
+        axis.line.x = element_line(color = "black", size = .2),  # Add x-axis line
+        axis.line.y = element_line(color = "black", size = .2),
+        axis.ticks.y = element_line(color = "black", size = 0.2)) +
+      #  legend.text = element_text(size = 12)) +  # Add y-axis line 
+  facet_grid(region ~ mh)
+
+ggsave("/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_TablesFigures/us_fig2.png", plot = us_fig2, width = 10, height = 1.75, dpi = 300)  # Adjust width, height, and dpi as needed
+
+```

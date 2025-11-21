@@ -1,0 +1,460 @@
+---
+title: "01_create_data"
+author: "Rachel Slimovitch"
+date: "2025-10-29"
+output: pdf_document
+---
+
+This script creates the dataset DEC_MAY_FINAL by compiling: 
+- CTIS files: "2020-12.csv", "2021-01.csv","2021-02.csv","2021-03.csv","2021-04.csv","2021-05.csv"
+- Every zip code + state zip code is in: ZIP_Alyssa.xlsx
+- Census regions: state_census, from covidcast package
+- Voter data: vote_data.csv
+- Ethnicity data: ethnicity_data.csv
+- Race data: county_race.csv
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, tidy.opts=list(width.cutoff=60),tidy=TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/01_create_data.Rmd")
+```
+
+
+# 01 *Step 1:* 
+
+reading in Dec2020 - May 2021 data, getting region data, attaching quartile data (can skip this)
+
+```{r}
+#Dec through May
+files=c("2020-12.csv", "2021-01.csv","2021-02.csv","2021-03.csv","2021-04.csv","2021-05.csv")
+d_a = data.table()
+
+#get data
+for(i in 1:length(files)){
+  temp = fread(here("Data", files[i]))
+  d_a = rbindlist(list(d_a, temp), fill = TRUE)
+  print(i)
+}
+
+# aggregate data over weeks - date format
+d_a3 = d_a #cope to d_a3
+d_a3 = d_a3[, date:=as.Date(EndDatetime)] 
+d_a3 = d_a3[, week:=epiweek(date)]
+d_a3 = d_a3[, week_date:=max(date), by = week]
+
+# filter by non-NA zip code
+d_a3 = d_a3 %>% mutate(A3=as.integer(A3))
+d_a4 = d_a3[!is.na(A3),]
+
+# link zip code to state
+zip = data.table(read_excel(here("Data", "ZIP_Alyssa.xlsx")) %>%
+  mutate(A3 = as.integer(ZIP))) %>% dplyr::select(A3, USPS_ZIP_PREF_STATE) %>% unique()
+
+# match to zip
+d_a5 = zip[d_a4, on = .(A3), nomatch = NULL]
+print(dim(d_a5))
+
+# match to census
+d_a6<-d_a5 %>%
+  left_join(state_census %>%
+              dplyr::select(REGION, ABBR),
+            by = c("USPS_ZIP_PREF_STATE" = "ABBR"))
+
+d_a6 <- merge(d_a5, state_census[, c("REGION", "ABBR")],
+              by.x = "USPS_ZIP_PREF_STATE", by.y = "ABBR",
+              all.x = TRUE)
+```
+
+Filter, to end on May 20, 2021
+```{r}
+d1b<- d_a6 %>%
+  filter(StartDatetime<= "2021-05-20")
+
+#create date range
+date_range <- seq(as.Date("2020-12-01"), as.Date("2021-05-20"), by = "1 day")
+day <- seq_along(date_range)
+date_table<-data.table(date = date_range, day = day)
+```
+
+Clean data & create new variables:
+```{r}
+#make date var and rename variables 
+d2 <- d1b %>% 
+  mutate(
+    date = as.Date(StartDatetime), #create new variable date
+    hh_total=as.integer(A5_1)+as.integer(A5_2)+as.integer(A5_3) #num in household
+  ) %>%
+  rename(
+    age = D2,
+    gender = D1,
+    prek_or_k = E1_1,
+    grades1_5 = E1_2,
+    grades6_8 = E1_3,
+    grades9_12 = E1_4,
+    modality_in_person = E2_1,
+    modality_part_time = E2_2,
+    hh_num_children=A5_1,
+    hh_num_18_64=A5_2,
+    hh_num_65up=A5_3,
+    worried_covid=C9,
+    financial_worry=C15,
+    education_level=D8,
+    employment=D9
+  ) 
+
+#create anxiety, dep, isolation, modality variables, comorbidity variable
+d3<- d2 %>%
+   mutate(
+    anxiety = ifelse(!is.na(C8_1), C8_1, ifelse(!is.na(C8a_1), C8a_1, C18a)),
+    depression = ifelse(!is.na(C8_2), C8_2, ifelse(!is.na(C8a_2), C8a_2, C18b)),
+    isolation = ifelse(!is.na(C8_3), C8_3, C8a_3),
+    modality_remote = ifelse((prek_or_k > 0 | grades1_5 > 0 | grades6_8 > 0 | grades9_12 > 0) &
+                             modality_in_person == 3 & modality_part_time == 3, 1, 0),
+    modality_part_time_1_0 = ifelse(modality_part_time == 2, 1,
+                                     ifelse(modality_part_time == 3, 0, "NA")),
+    modality_in_person_1_0 = ifelse(modality_in_person == 2, 1,
+                                     ifelse(modality_in_person == 3, 0, "NA")),
+    #num people
+    hh_num_children=as.integer(hh_num_children),
+    hh_num_18_64=as.integer(hh_num_18_64),
+    hh_num_65up=as.integer(hh_num_65up),
+    #create categorical variable for comorbidities
+    comorbid = case_when(
+      C1 == "9" ~ "0", !grepl(",", C1) & C1 != "9" ~ "1", grepl(",", C1) & 
+        !grepl("9", C1) & length(unlist(strsplit(C1, ","))) >= 2 ~ "2plus"),
+        REGION = as.factor(REGION),
+    #hh num: make NA if greater than 10 kids, 15 household people
+    hh_total=ifelse(hh_total>15, NA, hh_total),
+    hh_num_children=ifelse(hh_num_children>10, NA, hh_num_children),
+    #edit fips: so it is always 5 digits (don't drop 0 if leading) - create variable for first 2 digits in FIPS
+    fips= sprintf("%05d", fips),
+    fips_2 = substr(fips, 1, 2),
+    #make variables factors
+      REGION = as.factor(REGION),
+      age = as.factor(age),
+      gender = as.factor(gender),
+      comorbid = as.factor(comorbid),
+      #prek or k
+      prek_or_k=as.factor(prek_or_k),
+      prek_or_k = dplyr::recode(prek_or_k, "2" = "0"),
+      prek_or_k = fct_relevel(prek_or_k, "0", "1"),
+      #grades1-5
+      grades1_5=as.factor(grades1_5),
+      grades1_5 = dplyr::recode(grades1_5, "2" = "0"),
+      grades1_5 = fct_relevel(grades1_5, "0", "1"),
+      #grades6-8
+      grades6_8=as.factor(grades6_8),
+      grades6_8 = dplyr::recode(grades6_8, "2" = "0"),
+      grades6_8 = fct_relevel(grades6_8, "0", "1"),
+      #grades9-12
+      grades9_12=as.factor(grades9_12),
+      grades9_12 = dplyr::recode(grades9_12, "2" = "0"),
+      grades9_12= fct_relevel(grades9_12, "0", "1"),
+      #recode employment
+      employment=as.factor(employment),
+      employment=dplyr::recode(employment, "2"="0"),
+      employment=fct_relevel(employment, "0", "1"),
+    #give names
+    gender=dplyr::recode(gender, "1"="Male", "2"="Female", "3"="Nonbinary", 
+                         "4"="Prefer to self-describe", "5"="Prefer not to answer"),
+    age=dplyr::recode(age, "1"="18-24yrs", "2"="25-34yrs", "3"="35-44yrs", 
+                      "4"="45-54yrs", "5"="55-64yrs", "6"="65-74yrs", "7"="75+yrs"),
+    #create week number
+    week_no=paste(week(date), year(date))
+  )
+
+```
+
+
+Merge with voting data and date #.
+```{r}
+votes_zip1<-read.csv(here("Data", "vote_data.csv")) 
+
+#make numeric, exclude where no votes
+votes_zip2<-votes_zip1 %>%
+  mutate(
+    DEM=as.numeric(votes_dem),
+    TOTAL=as.numeric(votes_total),
+    fips= sprintf("%05d", GEOID_5)) 
+
+#sort by 5digit fips: combine votes, % dem by FIPS
+votes_zip3 <- votes_zip2 %>%
+  group_by(fips) %>%
+  dplyr::summarize(
+    TotalVotes = sum(TOTAL),
+    TotalDEM = sum(DEM)
+  ) %>%
+  mutate(pct_dem = TotalDEM / TotalVotes)
+
+d4 <- left_join(d3, votes_zip3, by = "fips")
+
+quartiles <- quantile(d4$pct_dem, probs = c(0.25, 0.5, 0.75), na.rm=TRUE)
+
+d5<- d4 %>%
+  mutate(
+    quartile = ifelse(pct_dem < quartiles[1], "quartile1",
+                      ifelse(pct_dem < quartiles[2], "quartile2",
+                             ifelse(pct_dem < quartiles[3], "quartile3", "quartile4")))
+  )
+
+#merge with date #
+d6<-d5[date_table, on="date"]
+
+#create binary MH outcomes, week_no
+d7<- d6 %>%
+  mutate(
+    anxiety_binary = ifelse (anxiety %in% c(1,2), 0, 1),
+    depression_binary = ifelse (depression %in% c(1,2), 0, 1),
+    isolation_binary = ifelse (isolation %in% c(1,2), 0, 1),
+    week_no=paste(week(date), year(date))
+  )
+```
+
+
+Clean data:
+- Must have >=0 children
+- Make anxiety, depression, isolation 0/1 variables
+- create indicator variable (not missing covariates): for 1) prek-12, and 2) below prek
+
+```{r}
+data_v2<- d7 %>%
+  mutate(hh_num_children1= ifelse(hh_num_children<0, NA, hh_num_children),
+         anxiety_binary= ifelse (anxiety %in% c(1,2), 0, 1),
+         depression_binary= ifelse (depression %in% c(1,2), 0, 1),
+         isolation_binary= ifelse (isolation %in% c(1,2), 0, 1))
+
+#create indicator: what would be in our final dataset
+data_v3 <- data_v2 %>%
+  #NON-EXCLUSIVE
+  mutate(indicator_var_nonexcl = ifelse( #for prek-gr12
+    !is.na(anxiety) &
+    !is.na(depression) &
+    !is.na(isolation) &
+    !is.na(gender) &
+    gender != 'Prefer n' &
+    !is.na(REGION) &
+    REGION != 'X' &
+    !is.na(worried_covid) &
+    !is.na(education_level) &
+    !is.na(hh_num_children1) &
+    !is.na(age) &
+    !is.na(comorbid) &
+    (grades1_5 == '1' | grades6_8 == '1' | grades9_12 == '1' | prek_or_k == '1') &
+    !is.na(modality_in_person_1_0) &
+    !is.na(modality_part_time_1_0) &
+    modality_in_person_1_0 != 'NA' &
+    modality_part_time_1_0 != 'NA' &
+    !is.na(financial_worry),
+    1, 0
+  )) %>%
+  #create indicator2 (for below prek)
+  mutate(indicator_var_nonexcl_belowprek = ifelse(
+    !is.na(anxiety) &
+    !is.na(depression) &
+    !is.na(isolation) &
+    !is.na(gender) &
+    gender != 'Prefer n' &
+    !is.na(REGION) &
+    REGION != 'X' &
+    !is.na(worried_covid) &
+    !is.na(education_level) &
+    !is.na(hh_num_children1) &
+    hh_num_children1 > 0 &
+    !is.na(age) &
+    !is.na(comorbid) &
+    !is.na(financial_worry),
+    1, 0
+  )) %>%
+  #create below prek
+  mutate(below_prek = 
+         ifelse(prek_or_k == 0 & grades1_5 == 0 & grades6_8 == 0 & grades9_12 == 0 
+                  & hh_num_children>=1, 1, 0))  %>%
+  #EXCLUSIVE
+  mutate(
+    indicator_var_excl = ifelse(
+      rowSums(cbind(grades1_5, grades6_8, grades9_12, prek_or_k)) == 1 &
+      !is.na(anxiety) &
+      !is.na(depression) &
+      !is.na(isolation) &
+      !is.na(gender) &
+      gender != 'Prefer n' &
+      !is.na(REGION) &
+      REGION != 'X' &
+      !is.na(worried_covid) &
+      !is.na(education_level) &
+      !is.na(hh_num_children1) &
+      !is.na(age) &
+      !is.na(comorbid) &
+      !is.na(modality_in_person_1_0) &
+      !is.na(modality_part_time_1_0) &
+      modality_in_person_1_0 != 'NA' &
+      modality_part_time_1_0 != 'NA' &
+      !is.na(financial_worry),
+      1, 0
+    )
+  ) %>%
+    mutate(indicator_var_excl_belowprek = ifelse(
+    !is.na(anxiety) &
+    !is.na(depression) &
+    !is.na(isolation) &
+    !is.na(gender) &
+    gender != 'Prefer n' &
+    !is.na(REGION) &
+    REGION != 'X' &
+    !is.na(worried_covid) &
+    !is.na(education_level) &
+    !is.na(hh_num_children1) &
+    hh_num_children1 > 0 &
+    !is.na(age) &
+    !is.na(comorbid) &
+    !is.na(financial_worry),
+    1, 0
+  ))
+```
+
+Rename other variables:
+```{r}
+data_v4<- data_v3 %>%
+  #check #s: make NA if <0 or >10
+  mutate(hh_num_65up = if_else(hh_num_65up > 10 | hh_num_65up < 0, NA_integer_, hh_num_65up),
+         hh_num_18_64 = if_else(hh_num_18_64>10 | hh_num_18_64<0, NA_integer_, hh_num_18_64)) %>%
+  dplyr::rename(
+  #avoiding contact
+    avoid_contact = C7,
+  #work outside home
+    work_outside_home = D10,
+  #mask wearing
+    mask_wearing = C14,
+  #ever tested
+    ever_tested = B8,
+  #num sick community
+    num_sick_community= A4,
+  #num sick hh
+    num_sick_hh = A2
+  ) %>%
+  #make character variables: # sick community, # sick hh
+  mutate(
+    num_sick_community=as.integer(num_sick_community),
+    num_sick_community = if_else(num_sick_community>100, NA_integer_, num_sick_community),
+    num_sick_hh=as.integer(num_sick_hh),
+    num_sick_hh = if_else(num_sick_hh>15, NA_integer_, num_sick_hh),
+  #recode 1/2 vars 0/1
+    work_outside_home = ifelse(work_outside_home==2, 0, work_outside_home),
+    ever_tested = ifelse(ever_tested==2, 0, ever_tested)
+  ) 
+```
+
+Add in region, rural/urban: 
+```{r}
+remotes::install_github("jjchern/fips@v0.0.5")  #from https://github.com/jjchern/fips
+
+
+urban_rural_data<-fips::nchs_urc %>%
+  dplyr::select(fips,code2013) %>%
+  dplyr::rename(urban_rural= code2013)
+
+data_v6 <- left_join(data_v4, urban_rural_data, by = "fips")
+```
+
+Add in % hispanic, % white, % black per fips:
+```{r}
+#ETHNCIITY: from ACS 2022 (5-year estimates), B04001
+data_ethnicity<-read.csv(here("Data", "ethnicity_data.csv")) 
+
+data_ethnicity_v1<- data_ethnicity %>%
+  #fips 5 digits, make variables
+  mutate(fips= sprintf("%05d", Geo_FIPS), 
+         percent_hispanic_latino = round(SE_B04001_010/SE_B04001_001,2)) %>%
+  dplyr::select(fips, percent_hispanic_latino)
+
+#quartiles
+quartile_hisp_latino<- quantile(data_ethnicity_v1$percent_hispanic_latino, probs=c(0.25, 0.5, 0.75))
+
+data_ethnicity_v2<- data_ethnicity_v1 %>%
+  mutate(
+    quartile_hisp_latino = ifelse (percent_hispanic_latino < quartile_hisp_latino[1], "quartile 1",
+                                   ifelse (percent_hispanic_latino < quartile_hisp_latino[2], "quartile 2",
+                                           ifelse (percent_hispanic_latino < quartile_hisp_latino[3], "quartile 3",
+                                                   "quartile 4")))
+  ) %>%
+  dplyr::select(fips, quartile_hisp_latino)
+
+
+#RACE: from ACS 2022 (5-year estimates)
+data_race<-read.csv(here("Data", "county_race.csv")) 
+
+data_race_v1<- data_race %>%
+  #make fips 5 digits, make variables
+  mutate(fips= sprintf("%05d", Geo_FIPS),
+         percent_white = round(SE_A03001_002/SE_A03001_001,2),
+         percent_black_aa=round(SE_A03001_003/SE_A03001_001,2)) %>%
+  dplyr::select(fips, percent_white, percent_black_aa)
+
+#quartiles
+quartile_white<- quantile(data_race_v1$percent_white, probs=c(0.25, 0.5, 0.75))
+quartile_black_aa<- quantile(data_race_v1$percent_black_aa, probs=c(0.25, 0.5, 0.75))
+
+data_race_v2<- data_race_v1 %>%
+  mutate(
+    quartile_white = ifelse (percent_white < quartile_white[1], "quartile 1",
+                                   ifelse (percent_white < quartile_white[2], "quartile 2",
+                                           ifelse (percent_white < quartile_white[3], "quartile 3",
+                                                   "quartile 4"))),
+    quartile_black_aa = ifelse (percent_black_aa < quartile_black_aa[1], "quartile 1",
+                                   ifelse (percent_black_aa < quartile_black_aa[2], "quartile 2",
+                                           ifelse (percent_black_aa < quartile_black_aa[3], "quartile 3",
+                                                   "quartile 4")))) %>%
+  dplyr::select(fips, quartile_white, quartile_black_aa)
+
+#merge:
+race_ethnicity<-merge(data_race_v2, data_ethnicity_v2, by="fips")
+
+#add to data:
+data_v7<- left_join(data_v6, race_ethnicity, by="fips")
+
+```
+
+Add in SVI:
+```{r}
+svi_data<-read.csv(here("Data", "SVI_2020_US_county.csv")) 
+
+svi_data2<- svi_data %>%
+  mutate(fips= sprintf("%05d", FIPS)) %>%
+  mutate(quartile_svi = ifelse (RPL_THEMES < 0.25, "quartile 1",
+                                   ifelse (RPL_THEMES < 0.5, "quartile 2",
+                                           ifelse (RPL_THEMES < 0.75, "quartile 3",
+                                                   "quartile 4")))) %>%
+  dplyr::select(fips, quartile_svi)
+
+data_v8<- left_join(data_v7, svi_data2, by="fips")
+```
+
+data_v8: Dimensions 7115469 by 194 (this is DEC_MAY_MAR13) - DELETE THIS
+
+
+Filter to stop at end of April:
+```{r}
+data_aprilend<- data_v8 %>%
+  filter(date<as.Date("2021-05-01"))
+```
+
+Save dataset: Dec2020-April2021. 
+```{r}
+write.csv(data_aprilend, file="/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/DEC_APRIL_cleaned.csv", row.names = FALSE)
+```
+

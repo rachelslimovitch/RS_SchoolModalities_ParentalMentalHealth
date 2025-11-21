@@ -1,0 +1,116 @@
+---
+title: "05_fig2"
+author: "Rachel Slimovitch"
+date: "2025-10-30"
+output: pdf_document
+---
+
+This code creates Figure 2: treatment effect of in-person learning compared to remote learning on parental isolation, anxiety, and depression.
+Estimates for Dec 2020 and April 2021 by:
+- All US: LPM, IPW, Male, Female, Low concern, High concern
+- Stratified by region:  LPM, IPW, Male, Female, Low concern, High concern
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/05_fig2.Rmd")
+```
+# Dataset: Dec, April
+Need one dataset for Dec (Dec1-Dec23), one for April 
+```{r}
+# read in data
+data = fread(here("RS_Thesis_Data", "data_analytic_prek12.csv"))
+names(data) <- make.names(names(data), unique = TRUE)
+```
+
+Clean:
+```{r}
+#remove spacing (SVI, financial worry, COVID worry)
+data$quartile_svi <- gsub("quartile ", "quartile", data$quartile_svi)
+data$financial_worry<- gsub(" worried", "worried", data$financial_worry)
+data$worried_covid<- gsub(" worried", "worried", data$worried_covid)
+
+#Filter: only include those who are not hybrid.
+data_nohybrid<- data %>%
+  filter(modality_part_time_1_0=="0") %>%
+  mutate(modality_in_person_1_0=as.integer(modality_in_person_1_0)) 
+```
+
+Create Dec/April (SAME SAMPLE SIZE AS BEFORE)
+```{r}
+#Dec- 196,076 
+data_nohybrid_prek12_dec<- data_nohybrid %>%
+  filter(date >= "2020-12-01" & date<= "2020-12-23")
+
+svy_dec<- svydesign(ids = ~1, weights = ~weight, data = data_nohybrid_prek12_dec) 
+
+#April- 154,190
+data_nohybrid_prek12_april<- data_nohybrid %>%
+  filter(date >= "2021-04-01" & date< "2021-05-01") 
+
+svy_april<- svydesign(ids = ~1, weights = ~weight, data = data_nohybrid_prek12_april) 
+```
+
+# Run associational #s (LPM)
+Covariates to adjust for:
+```{r}
+v3_us_fig2<- c("modality_in_person_1_0", "REGION","urban_rural", "gender", "age", "quartile_white",
+               "quartile_black_aa", "quartile_hisp_latino","financial_worry", "education_level", "employment",
+               "adult_cat", "child_cat","worried_covid", "avoid_contact", "comorbid")
+            
+```
+
+```{r}
+coef_fig2<-c("modality_in_person_1_0", "gender", "age", "quartile_white",
+            "quartile_black_aa", "comorbid", "quartile_hisp_latino", "avoid_contact",
+            "financial_worry", "education_level", "employment", "adult_cat",
+            "child_cat", "urban_rural", "worried_covid", "quartile_svi", "week_no", "REGION", "week_no * REGION")
+
+#call this for in-person dec, in-person april. Do this for each region
+fig2_associational<- function(outcome, design_name, name) {
+  #fit model
+  formula <- as.formula(paste(outcome, "~", paste(v3_coef_fig2, collapse = " + ")))
+  model_svy <- svyglm(formula, design = design_name)
+  #get confint
+  lb<- round(confint(model_svy)["modality_in_person_1_0",1],6)*100 #lower bound
+  ub<- round(confint(model_svy)["modality_in_person_1_0",2],6)*100 #lower bound
+  #return
+  results <- data.table(
+    variable = name,
+    mean = (lb + ub) / 2,
+    ub_estimate = ub,
+    lb_estimate = lb
+  )
+  return(results)
+}
+isol_dec<- fig2_associational(outcome="isolation_binary", 
+                                 design_name=svy_dec, name="isol_dec")
+anx_dec<- fig2_associational(outcome="anxiety_binary", 
+                                 design_name=svy_dec, name="anx_dec")
+dep_dec<- fig2_associational(outcome="depression_binary", 
+                                 design_name=svy_dec, name="isol_dec")
+
+isol_apr<- fig2_associational(outcome="isolation_binary", 
+                                 design_name=svy_april, name="isol_apr")
+anx_apr<- fig2_associational(outcome="anxiety_binary", 
+                                 design_name=svy_april, name="anx_apr")
+dep_apr<- fig2_associational(outcome="depression_binary", 
+                                 design_name=svy_april, name="dep_apr")
+
+interaction<- rbind(isol_dec, isol_apr, anx_dec, anx_apr, dep_dec, dep_apr)
+```

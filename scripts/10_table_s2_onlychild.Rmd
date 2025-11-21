@@ -1,0 +1,270 @@
+---
+title: "10_table_s2_onlychild"
+author: "Rachel Slimovitch"
+date: "2025-11-03"
+output: pdf_document
+---
+
+
+Code creates Supp. Table 2 (LPMs, December-April) for parents with only 1 child.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/10_table_s2_onlychild.Rmd")
+```
+
+
+# Data
+Read in data (from 02_analytic_sample.Rmd):
+```{r}
+data = fread(here("RS_Thesis_Data", "data_analytic_prek12.csv"))
+names(data) <- make.names(names(data), unique = TRUE)
+
+# only child
+data_single<- data %>%
+  filter(hh_num_children==1)
+```
+
+# Functions
+```{r}
+associational_mod_fcn<- function(outcome, covariates, design_name, estimate_name) {
+  #fit model
+  formula <- as.formula(paste(outcome, "~", paste(covariates, collapse = " + ")))
+  model_svy <- svyglm(formula, design = design_name)
+  model<- summary(model_svy)
+  #get estimates
+  #estimates for inperson
+  inperson_estimate <- round(100*(model$coefficients["modality_in_person_1_0", "Estimate"]),2) #gives as percent
+  star_inperson<- stars(model$coefficients["modality_in_person_1_0", "Pr(>|t|)"])
+  inperson_estimate_pval <- paste0(format(inperson_estimate), " ", star_inperson)
+  
+  #estimates for hybrid
+  hybrid_estimate <- round(100*(model$coefficients["modality_part_time_1_0", "Estimate"]),2) #gives as percent
+  star_hybrid<- stars(model$coefficients["modality_part_time_1_0", "Pr(>|t|)"])
+  hybrid_estimate_pval <- paste0(format(hybrid_estimate), " ", star_hybrid)
+  #return
+  results <- data.table(
+    variable = c("inperson_estimate", "hybrid_estimate"),
+    estimate = c(inperson_estimate_pval, hybrid_estimate_pval)
+  )
+  setnames(results, "estimate", estimate_name)
+  return(results)
+}
+
+# Define a function to determine the number of stars based on the p-value
+stars <- function(p_value) {
+  if (p_value < 0.001) {
+    return("***")
+  } else if (p_value < 0.01) {
+    return("**")
+  } else if (p_value < 0.05) {
+    return("*")
+  } else {
+    return("")
+  }
+}
+
+stars2 <- function(p_value) {
+  if (p_value < 0.05) {
+    return("**")
+  } else if (p_value < 0.1) {
+    return("*")
+  } else {
+    return("")
+  }
+}
+```
+
+# Coefficient lists
+```{r}
+v1_simple<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "REGION", "week_no * REGION")
+
+v2_simple<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "REGION", "week_no * REGION",
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat")
+
+v3_simple<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "REGION", "week_no * REGION",
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat", "worried_covid", 
+              "avoid_contact", "comorbid")
+            
+```
+
+Stratified by region:
+```{r}
+v1_region_stratified<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "USPS_ZIP_PREF_STATE", "week_no * USPS_ZIP_PREF_STATE")
+
+v2_region_stratified<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "USPS_ZIP_PREF_STATE", "week_no * USPS_ZIP_PREF_STATE",
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat")
+
+v3_region_stratified<- c("modality_in_person_1_0", "modality_part_time_1_0", "week_no", "USPS_ZIP_PREF_STATE", "week_no * USPS_ZIP_PREF_STATE",
+              "urban_rural", "gender", "age", "quartile_white", "quartile_black_aa", "quartile_hisp_latino",
+              "financial_worry", "education_level", "employment", "adult_cat", "worried_covid", 
+              "avoid_contact", "comorbid")
+```
+
+Survey design setup:
+```{r}
+svy_associational<- svydesign(ids = ~1, weights = ~weight, data=data_single)
+
+#south
+data_single_south<- data_single %>%
+  dplyr::filter(REGION=="South")
+svy_associational_south<- svydesign(ids = ~1, weights = ~weight, data = data_single_south)
+
+#northeast
+data_single_northeast<- data %>%
+  filter(REGION=="Northeast")
+svy_associational_northeast<- svydesign(ids = ~1, weights = ~weight, data=data_single_northeast)
+
+#west
+data_single_west<- data %>%
+  filter(REGION=="West")
+svy_associational_west<- svydesign(ids = ~1, weights = ~weight, data = data_single_west)
+
+#midwest
+data_single_midwest<- data %>%
+  filter(REGION=="Midwest")
+svy_associational_midwest<- svydesign(ids = ~1, weights = ~weight, data = data_single_midwest)
+```
+
+## Isolation
+```{r}
+data_isol<- function() {
+  #ISOL
+  isolation_mod1<- associational_mod_fcn("isolation_binary", v1_simple, svy_associational, "Isol Model 1")
+  isolation_mod2<- associational_mod_fcn("isolation_binary", v2_simple, svy_associational, "Isol Model 2")
+  isolation_mod3<- associational_mod_fcn("isolation_binary", v3_simple, svy_associational, "Isol Model 3")
+  #by region
+  isol_mod1_south<-associational_mod_fcn("isolation_binary", v1_region_stratified, svy_associational_south, "Isol Model 1 South")
+  isol_mod2_south<-associational_mod_fcn("isolation_binary", v2_region_stratified, svy_associational_south, "Isol Model 2 South")
+  isol_mod3_south<-associational_mod_fcn("isolation_binary", v3_region_stratified, svy_associational_south, "Isol Model 3 South")
+  
+  isol_mod1_northeast<-associational_mod_fcn("isolation_binary", v1_region_stratified, svy_associational_northeast, "Isol Model 1 Northeast")
+  isol_mod2_northeast<-associational_mod_fcn("isolation_binary", v2_region_stratified, svy_associational_northeast, "Isol Model 2 Northeast")
+  isol_mod3_northeast<-associational_mod_fcn("isolation_binary", v3_region_stratified, svy_associational_northeast, "Isol Model 3 Northeast")
+  
+  isol_mod1_west<-associational_mod_fcn("isolation_binary", v1_region_stratified, svy_associational_west, "Isol Model 1 West")
+  isol_mod2_west<-associational_mod_fcn("isolation_binary", v2_region_stratified, svy_associational_west, "Isol Model 2 West")
+  isol_mod3_west<-associational_mod_fcn("isolation_binary", v3_region_stratified, svy_associational_west, "Isol Model 3 West")
+  
+  isol_mod1_midwest<- associational_mod_fcn("isolation_binary", v1_region_stratified, svy_associational_midwest, "Isol Model 1 Midwest")
+  isol_mod2_midwest<- associational_mod_fcn("isolation_binary", v2_region_stratified, svy_associational_midwest, "Isol Model 2 Midwest")
+  isol_mod3_midwest<- associational_mod_fcn("isolation_binary", v3_region_stratified, svy_associational_midwest, "Isol Model 3 Midwest")
+  
+  #bind
+  isol_data<- cbind(isolation_mod1, isolation_mod2, isolation_mod3,
+        isol_mod1_south,isol_mod2_south, isol_mod3_south,
+        isol_mod1_northeast, isol_mod2_northeast, isol_mod3_northeast,
+        isol_mod1_west, isol_mod2_west, isol_mod3_west,
+        isol_mod1_midwest, isol_mod2_midwest, isol_mod3_midwest)
+  #return
+  return(isol_data)
+
+}
+
+isol_data<- data_isol()
+View(isol_data)
+```
+
+## Anxiety
+```{r}
+data_anx<- function() {
+  #anx
+  mod1<- associational_mod_fcn("anxiety_binary", v1_simple, svy_associational, "Anx Model 1")
+  mod2<- associational_mod_fcn("anxiety_binary", v2_simple, svy_associational, "Anx Model 2")
+  mod3<- associational_mod_fcn("anxiety_binary", v3_simple, svy_associational, "Anx Model 3")
+  #by region
+  mod1_south<-associational_mod_fcn("anxiety_binary", v1_region_stratified, svy_associational_south, "Anx Model 1 South")
+  mod2_south<-associational_mod_fcn("anxiety_binary", v2_region_stratified, svy_associational_south, "Anx Model 2 South")
+  mod3_south<-associational_mod_fcn("anxiety_binary", v3_region_stratified, svy_associational_south, "Anx Model 3 South")
+  
+  mod1_northeast<-associational_mod_fcn("anxiety_binary", v1_region_stratified, svy_associational_northeast, "Anx Model 1 Northeast")
+  mod2_northeast<-associational_mod_fcn("anxiety_binary", v2_region_stratified, svy_associational_northeast, "Anx Model 2 Northeast")
+  mod3_northeast<-associational_mod_fcn("anxiety_binary", v3_region_stratified, svy_associational_northeast, "Anx Model 3 Northeast")
+  
+  mod1_west<-associational_mod_fcn("anxiety_binary", v1_region_stratified, svy_associational_west, "Anx Model 1 West")
+  mod2_west<-associational_mod_fcn("anxiety_binary", v2_region_stratified, svy_associational_west, "Anx Model 2 West")
+  mod3_west<-associational_mod_fcn("anxiety_binary", v3_region_stratified, svy_associational_west, "Anx Model 3 West")
+  
+  mod1_midwest<- associational_mod_fcn("anxiety_binary", v1_region_stratified, svy_associational_midwest, "Anx Model 1 Midwest")
+  mod2_midwest<- associational_mod_fcn("anxiety_binary", v2_region_stratified, svy_associational_midwest, "Anx Model 2 Midwest")
+  mod3_midwest<- associational_mod_fcn("anxiety_binary", v3_region_stratified, svy_associational_midwest, "Anx Model 3 Midwest")
+  
+  #bind
+  anx_data<- cbind(mod1, mod2, mod3,
+        mod1_south, mod2_south, mod3_south,
+        mod1_northeast, mod2_northeast, mod3_northeast,
+        mod1_west, mod2_west, mod3_west,
+        mod1_midwest, mod2_midwest, mod3_midwest)
+  #return
+  return(anx_data)
+
+}
+
+anx_data<- data_anx()
+View(anx_data)
+```
+
+## Depression
+```{r}
+data_dep<- function() {
+  #dep
+  mod1<- associational_mod_fcn("depression_binary", v1_simple, svy_associational, "Model 1")
+  mod2<- associational_mod_fcn("depression_binary", v2_simple, svy_associational, "Model 2")
+  mod3<- associational_mod_fcn("depression_binary", v3_simple, svy_associational, "Model 3")
+  #by region
+  mod1_south<-associational_mod_fcn("depression_binary", v1_region_stratified, svy_associational_south, "Model 1 South")
+  mod2_south<-associational_mod_fcn("depression_binary", v2_region_stratified, svy_associational_south, "Model 2 South")
+  mod3_south<-associational_mod_fcn("depression_binary", v3_region_stratified, svy_associational_south, "Model 3 South")
+  
+  mod1_northeast<-associational_mod_fcn("depression_binary", v1_region_stratified, svy_associational_northeast, "Model 1 Northeast")
+  mod2_northeast<-associational_mod_fcn("depression_binary", v2_region_stratified, svy_associational_northeast, "Model 2 Northeast")
+  mod3_northeast<-associational_mod_fcn("depression_binary", v3_region_stratified, svy_associational_northeast, "Model 3 Northeast")
+  
+  mod1_west<-associational_mod_fcn("depression_binary", v1_region_stratified, svy_associational_west, "Model 1 West")
+  mod2_west<-associational_mod_fcn("depression_binary", v2_region_stratified, svy_associational_west, "Model 2 West")
+  mod3_west<-associational_mod_fcn("depression_binary", v3_region_stratified, svy_associational_west, "Model 3 West")
+  
+  mod1_midwest<- associational_mod_fcn("depression_binary", v1_region_stratified, svy_associational_midwest, "Model 1 Midwest")
+  mod2_midwest<- associational_mod_fcn("depression_binary", v2_region_stratified, svy_associational_midwest, "Model 2 Midwest")
+  mod3_midwest<- associational_mod_fcn("depression_binary", v3_region_stratified, svy_associational_midwest, "Model 3 Midwest")
+  
+  #bind
+  dep_data<- cbind(mod1, mod2, mod3,
+        mod1_south, mod2_south, mod3_south,
+        mod1_northeast, mod2_northeast, mod3_northeast,
+        mod1_west, mod2_west, mod3_west,
+        mod1_midwest, mod2_midwest, mod3_midwest)
+  #return
+  return(dep_data)
+
+}
+
+dep_data<- data_dep()
+View(dep_data)
+```
+
+# Baseline:
+```{r}
+svytable(~isolation_binary, svy_associational) %>% prop.table()
+svytable(~anxiety_binary, svy_associational) %>% prop.table()
+svytable(~depression_binary, svy_associational) %>% prop.table()
+```

@@ -1,0 +1,208 @@
+---
+title: "02_analytic_sample"
+author: "Rachel Slimovitch"
+date: "2025-10-30"
+output: pdf_document
+---
+
+This script reads in the data (Dec2020-April2021, from 01_create_data.Rmd) and creates the analytic sample.
+It identifies specific #s for Figure 1.
+It creates the dataset for Table 1 (analytic sample from Fig1 (without belowprek only), with variables correctly named)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, tidy.opts=list(width.cutoff=60),tidy=TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/02_analytic_sample.Rmd")
+```
+
+# Read in data
+```{r}
+data = fread(here("RS_Thesis_Data", "DEC_APRIL_cleaned.csv"))
+```
+
+# Figure 1: creating analytic sample
+
+Full sample:
+```{r}
+dim(data) # 6591292
+```
+
+Filtering to parent/guardian of child in grade 12 or younger:
+```{r}
+data_1 <- data %>%
+  filter(hh_num_children>0) %>%
+  filter(below_prek==1 | prek_or_k==1 | grades1_5==1 | grades6_8==1 | grades9_12==1) #1,953,817 
+```
+
+Filter to not missing info on school modality (which only applies for kids prek or older):
+```{r}
+data_2_below_prek<- data_1 %>%
+  filter(below_prek==1) #477,887
+
+data_2_prek_above<- data_1 %>%
+  filter(below_prek!=1) %>%
+  filter(modality_in_person_1_0!="NA" & modality_part_time_1_0!="NA") #1,386,222
+
+data_3<- rbind(data_2_below_prek, data_2_prek_above) #1,864,109
+``` 
+
+Filter to having info on MH measures:
+```{r}
+data_4 <- data_3 %>%
+  filter(!is.na(anxiety) & !is.na(depression) &!is.na(isolation)) #1,824,864 
+```
+
+See how many are below pre_k, prek/k, or gr1-12:
+```{r}
+data_final_1_12<- data_4 %>%
+  filter(grades9_12 == 1 | grades1_5 == 1 | grades6_8 == 1) #1,185,273
+
+data_final_belowprek<- data_4 %>% #463,981
+  filter(below_prek==1)
+
+data_final_prek_or_k<- data_4 %>% #418,577 
+  filter(prek_or_k==1)
+```
+
+# TABLE 1
+First, create missing categories:
+```{r}
+data_final<- data_4 %>%
+  mutate(quartile_white=ifelse(is.na(quartile_white), "missing", quartile_white),
+         quartile_black_aa=ifelse(is.na(quartile_black_aa), "missing", quartile_black_aa),
+         quartile_hisp_latino=ifelse(is.na(quartile_hisp_latino), "missing", quartile_hisp_latino),
+         worried_covid=ifelse(is.na(worried_covid), "missing", worried_covid),
+         avoid_contact=ifelse(is.na(avoid_contact), "missing", avoid_contact),
+         financial_worry=ifelse(is.na(financial_worry), "missing", financial_worry),
+         comorbid=ifelse(is.na(comorbid), "missing", comorbid),
+         gender=ifelse(is.na(gender), "missing", gender),
+         gender=ifelse(gender=="Prefer not to answer", "missing", gender),
+         education_level=ifelse(is.na(education_level), "missing", education_level),
+         employment=ifelse(is.na(employment), "missing", employment),
+         hh_num_18_64=ifelse(is.na(hh_num_18_64), "missing", hh_num_18_64),
+         age=ifelse(is.na(age), "missing", age),
+         hh_num_children1=ifelse(is.na(hh_num_children1), "missing", hh_num_children1),
+         urban_rural=ifelse(is.na(urban_rural), "missing", urban_rural),
+         REGION=ifelse(is.na(REGION), "missing", REGION),
+         week_no=ifelse(is.na(week_no), "missing", week_no),
+         quartile_svi=ifelse(is.na(quartile_svi), "missing", quartile_svi))
+```
+
+
+Finish cleaning data for dataset that includes below preK:
+```{r}
+#redo categories for age, gender, education
+data_final_gr12max<- data_final %>%
+  #age
+  mutate(age2 = case_when(
+    age %in% c("18-24yrs") ~ "18-34 years",
+    age %in% c("25-34yrs") ~ "18-34 years",
+    age %in% c("35-44yrs") ~ "35-44 years",
+    age %in% c("45-54yrs") ~ "45-54 years",
+    age %in% c("55-64yrs") ~ "55+ years",
+    age %in% c("65-74yrs") ~ "55+ years",
+    age %in% c("75+yrs") ~ "55+ years",
+    TRUE ~ "Missing"
+  )) %>%
+  #education
+  mutate(education_category = case_when(
+    education_level %in% c(1, 2) ~ "HS or less",
+    education_level == 3 ~ "Some college",
+    education_level %in% c(4, 5) ~ "2 or 4yr college",
+    education_level %in% 6:8 ~ "Masters+",
+    TRUE ~ "Missing"
+  )) %>%
+  mutate(education_category = fct_relevel(education_category,
+                                          "HS or less", "Some college", "2 or 4yr college", "Masters+")) %>%
+  mutate(education_category=as.factor(education_category)) %>%
+  #gender
+  mutate(gender_category = case_when(
+    gender %in% c("Female") ~ "female",
+    gender %in% c("Male") ~ "male",
+    gender %in% c("Nonbinary", "Prefer not to answer", "Prefer to self-describe") ~ "other",
+    TRUE~ "Missing"
+    )) %>%
+  mutate(gender_category = fct_relevel(gender_category,
+                                          "male", "female", "other", "Missing")) %>%
+  #worried_covid
+  mutate(worried_covid = case_when(
+    worried_covid == 1 ~ "Very worried",
+    worried_covid == 2 ~ "Somewhat worried",
+    worried_covid == 3 ~ "Not too worried",
+    worried_covid == 4 ~ "Not worried at all",
+    TRUE ~ "Missing"
+    )) %>%
+  mutate(worried_covid = factor(worried_covid, levels = c("Not worried at all", "Not too worried", "Somewhat worried", "Very worried", "Missing"))) %>%
+  #financial
+  mutate(financial_worry = case_when(
+    financial_worry==1 ~ "Very worried",
+    financial_worry==2 ~ "Somewhat worried",
+    financial_worry==3 ~ "Not too worried",
+    financial_worry==4 ~ "Not worried at all",
+    TRUE ~ "Missing"
+    )) %>%
+  mutate(financial_worry = factor(financial_worry, levels = c("Not worried at all", "Not too worried", "Somewhat worried", "Very worried", "Missing"))) %>%
+  #regions
+    mutate(REGION = case_when(
+    REGION==1 ~ "Northeast",
+    REGION==2 ~ "Midwest",
+    REGION==3 ~ "South",
+    REGION==4 ~ "West",
+    TRUE ~"Missing")) %>%
+  mutate(REGION = factor(REGION, levels = c("Northeast", "Midwest", 
+                                       "South", "West", "Missing"))) %>%
+ mutate(urban_rural_category = case_when(
+    urban_rural == 1 ~ "Large central",
+    urban_rural == 2 ~ "large fringe",
+    urban_rural %in% c(3, 4) ~ "Medium/small metro",
+    urban_rural %in% c(5, 6) ~ "Micropolitan/non-core",
+    TRUE ~ "Missing"
+  )) %>%
+ mutate(child_cat = case_when(
+    hh_num_children1 == 1 ~ "one",
+    hh_num_children1 == 2 ~ "two",
+    hh_num_children1 >=3 ~ "three+",
+    TRUE ~ "Missing"
+  )) %>%
+ mutate(adult_cat = case_when(
+    hh_num_18_64 %in% c("0","1") ~ "one",
+    hh_num_18_64 == "2" ~ "two",
+    hh_num_18_64 %in% c("3", "4", "5", "6", "7", "8", "9", "10") ~ "three+",
+    TRUE~ "Missing"
+  )) 
+
+data_final_gr12max$avoid_contact<- as.factor(data_final_gr12max$avoid_contact)
+data_final_gr12max$employment<-as.factor(data_final_gr12max$employment)
+
+write.csv(data_final_gr12max, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/data_analytic_gr12max.csv")
+```
+
+# Table 1 dataset
+Where we restrict to preK-gr12. 
+Number of obs: 1,360,883 
+
+```{r}
+#redo categories for age, gender, education
+data_final_prek12<- data_final_gr12max %>%
+  filter(below_prek!=1) 
+
+write.csv(data_final_prek12, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/data_analytic_prek12.csv")
+
+```
+
+

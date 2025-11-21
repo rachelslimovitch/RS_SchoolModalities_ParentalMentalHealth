@@ -1,0 +1,158 @@
+---
+title: "09_table3_IPW"
+author: "Rachel Slimovitch"
+date: "2025-11-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/09_table3_IPW.Rmd")
+```
+
+# Remote-hybrid:
+```{r}
+remote_hybrid_v1 = fread(here("RS_Thesis_Data", "remote_hybrid_DiD.csv"))
+names(remote_hybrid_v1) <- make.names(names(remote_hybrid_v1), unique = TRUE)
+remote_hybrid_preK_12<- remote_hybrid_v1 %>% filter(below_prek!=1) #N = 65760
+
+remote_hybrid<- remote_hybrid_preK_12 %>%
+  filter(modality_in_person_1_0=="0") %>%
+  mutate(modality_part_time_1_0=as.integer(modality_part_time_1_0)) 
+```
+
+IPW fcn:
+```{r}
+v3_simple_ipw<- c("REGION", "urban_rural", "gender", "age", "quartile_white", "financial_worry",
+                  "education_level", "employment", "adult_cat", "child_cat","worried_covid",
+                  "avoid_contact", "comorbid")
+
+
+stars2 <- function(p_value) {
+  if (p_value < 0.05) {
+    return("*")
+  } else {
+    return("")
+  }
+}
+
+# Hybrid IPW
+table3_ipw<- function(outcome_var, data_svy) {
+  formula_str <- paste("modality_part_time_1_0 ~", paste(v3_simple_ipw, collapse = " + "))
+  ps_model <- svyglm(as.formula(formula_str), design = data_svy, family = "binomial")
+  
+  #Step 3: calculate ps
+  data_ipw<- remote_hybrid2 %>%
+      dplyr::mutate(ps = predict(ps_model, newdata = remote_hybrid2, type = "response"))
+  
+  #Step 4: Remove non-overlapping
+    data_overlap <- data_ipw %>%
+      filter(ps >= min(data_ipw$ps[data_ipw$modality_part_time_1_0 == 1]) & 
+               ps <= max(data_ipw$ps[data_ipw$modality_part_time_1_0 == 1]))
+    num <- nrow(data_ipw) - nrow(data_overlap)
+    
+    #Step 5: Create IPW*survey weight
+    data_overlap2 <- data_overlap %>%
+      mutate(ipw = ifelse(data_overlap$modality_part_time_1_0 == 1, 1 / ps, 1 / (1 - ps))) %>%
+      mutate(ipw_surveywt = ipw * data_overlap$weight)
+    
+    #Step 6: Create survey design for outcome
+    svy_outcome <- svydesign(ids = ~1, weights = ~ipw_surveywt, data = data_overlap2)
+    
+    #Step 7: run outcome
+    formula_outcome <- paste(outcome_var,paste("~ modality_part_time_1_0 +"), paste(v3_simple_ipw, collapse = " + "))
+    outcome_ipw<- svyglm(as.formula(formula_outcome), design = svy_outcome)
+    model<-summary(outcome_ipw)
+    #Step 8: pt estimate, p-val
+    hybrid_estimate <- round(100*(model$coefficients["modality_part_time_1_0", "Estimate"]),2) #gives as percent
+    star <- stars2(model$coefficients["modality_part_time_1_0", "Pr(>|t|)"])
+    ci <- round(100 * confint(outcome_ipw)["modality_part_time_1_0", ], 2)
+    ci_str <- paste0("(", ci[1], ", ", ci[2], ")")
+    est_pval_ci <- paste0(format(hybrid_estimate), " ", star, " ", ci_str)
+    return(est_pval_ci)
+}
+
+# In-person IPW
+table3_ipw_inp<- function(outcome_var, data_svy_inp) {
+  formula_str <- paste("modality_in_person_1_0 ~", paste(v3_simple_ipw, collapse = " + "))
+  ps_model <- svyglm(as.formula(formula_str), design = data_svy_inp, family = "binomial")
+  
+  #Step 3: calculate ps
+  data_ipw<- remote_inperson2 %>%
+      dplyr::mutate(ps = predict(ps_model, type="response"))
+  
+  #Step 4: Remove non-overlapping
+    data_overlap <- data_ipw %>%
+      filter(ps >= min(data_ipw$ps[data_ipw$modality_in_person_1_0 == 1]) & 
+               ps <= max(data_ipw$ps[data_ipw$modality_in_person_1_0 == 1]))
+    num <- nrow(data_ipw) - nrow(data_overlap)
+    
+    #Step 5: Create IPW*survey weight
+    data_overlap2 <- data_overlap %>%
+      mutate(ipw = ifelse(data_overlap$modality_in_person_1_0 == 1, 1 / ps, 1 / (1 - ps))) %>%
+      mutate(ipw_surveywt = ipw * data_overlap$weight)
+    
+    #Step 6: Create survey design for outcome
+    svy_outcome <- svydesign(ids = ~1, weights = ~ipw_surveywt, data = data_overlap2)
+    
+    #Step 7: run outcome
+    formula_outcome <- paste(outcome_var,paste("~ modality_in_person_1_0 +"), paste(v3_simple_ipw, collapse = " + "))
+    outcome_ipw<- svyglm(as.formula(formula_outcome), design = svy_outcome)
+    model<-summary(outcome_ipw)
+    #Step 8: pt estimate, p-val
+    inperson_estimate <- round(100*(model$coefficients["modality_in_person_1_0", "Estimate"]),2) #gives as percent
+    star <- stars2(model$coefficients["modality_in_person_1_0", "Pr(>|t|)"])
+    ci <- round(100 * confint(outcome_ipw)["modality_in_person_1_0", ], 2)
+    ci_str <- paste0("(", ci[1], ", ", ci[2], ")")
+    est_pval_ci <- paste0(format(inperson_estimate), " ", star, " ", ci_str)
+    return(est_pval_ci)
+}
+```
+
+
+```{r}
+data_svy <- svydesign(ids = ~1, weights = ~weight, data = remote_hybrid)
+hybrid_isol_ipw<- table3_ipw("isolation_binary", data_svy)
+hybrid_anx_ipw<- table3_ipw("anxiety_binary", data_svy)
+hybrid_dep_ipw<- table3_ipw("depression_binary", data_svy)
+
+```
+
+
+# Remote - inperson
+
+Data:
+```{r}
+remote_inperson_v1 = fread(here("RS_Thesis_Data", "remote_inperson_DiD.csv"))
+names(remote_inperson_v1) <- make.names(names(remote_inperson_v1), unique = TRUE)
+remote_inperson_preK_12<- remote_inperson_v1 %>% filter(below_prek!=1) #N = 27,157
+
+remote_inperson<- remote_inperson_preK_12 %>%
+  filter(modality_part_time_1_0=="0") %>%
+  mutate(modality_in_person_1_0=as.integer(modality_in_person_1_0)) 
+
+```
+
+Run fcns:
+```{r}
+data_svy_inp <- svydesign(ids = ~1, weights = ~weight, data = remote_inperson2)
+inp_isol_ipw<- table3_ipw_inp("isolation_binary", data_svy_inp)
+inp_anx_ipw<- table3_ipw_inp("anxiety_binary", data_svy_inp)
+inp_dep_ipw<- table3_ipw_inp("depression_binary", data_svy_inp)
+```

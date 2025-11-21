@@ -1,0 +1,247 @@
+---
+title: "03_table1"
+author: "Rachel Slimovitch"
+date: "2025-10-30"
+output: pdf_document
+---
+
+This file creates Table 1 (and Supp. T1)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/03_table1.Rmd")
+```
+
+# Data
+Read in data (from 02_analytic_sample.Rmd):
+```{r}
+data = fread(here("RS_Thesis_Data", "data_analytic_prek12.csv"))
+```
+
+# Functions:
+```{r}
+table1_v2_row_fcn<- function(variable, value) {
+  #set up data
+  data_filtered <- data[data[[variable]] == value, ]
+  #rowname
+  rowname<-paste0(variable, value)
+  #create column
+  col<- table1_v2_function(name=rowname, data=data_filtered) 
+}
+
+
+table1_v2_function<- function(name, data) {
+  #get column information: anx
+  unweighted_n_anx<- table(data$anxiety_binary)[2] #unweighted N (anx=1)
+  weighted_percent_anx<- round(weighted.mean(data$anxiety_binary== 1, w = data$weight),2)*100 #weighted percent
+  combined_anx<- (sprintf("%s (%.0f)", format(unweighted_n_anx, big.mark = ","), weighted_percent_anx))
+  
+  #column: depression
+  unweighted_n_dep<- table(data$depression_binary)[2] #unweighted N 
+  weighted_percent_dep<- round(weighted.mean(data$depression_binary== 1, w = data$weight),2)*100 #weighted percent
+  combined_dep<- (sprintf("%s (%.0f)", format(unweighted_n_dep, big.mark = ","), weighted_percent_dep))
+  
+  #column: isol
+  unweighted_n_isol<- table(data$isolation_binary)[2] #unweighted N
+  weighted_percent_isol<- round(weighted.mean(data$isolation_binary== 1, w = data$weight),2)*100 #weighted percent
+  combined_isol<- (sprintf("%s (%.0f)", format(unweighted_n_isol, big.mark = ","), weighted_percent_isol))
+  
+  #combine into 1 row:
+  df<-data.frame(name, combined_isol, combined_anx, combined_dep)
+}
+
+```
+
+## T1, by variable: 
+```{r}
+remote0<- table1_v2_row_fcn("modality_remote", 0)
+remote1<- table1_v2_row_fcn("modality_remote", 1)
+
+hybrid0<- table1_v2_row_fcn("modality_part_time_1_0", 0)
+hybrid1<- table1_v2_row_fcn("modality_part_time_1_0", 1)
+
+inperson0<- table1_v2_row_fcn("modality_in_person_1_0", 0)
+inperson1<- table1_v2_row_fcn("modality_in_person_1_0", 1)
+
+parent_age18_34<- table1_v2_row_fcn("age2", "18-34 years")
+parent_age35_44<- table1_v2_row_fcn("age2", "35-44 years")
+parent_age45_54<- table1_v2_row_fcn("age2", "45-54 years")
+parent_age55_plus<- table1_v2_row_fcn("age2", "55+ years")
+parent_age_missing<- table1_v2_row_fcn("age2", "Missing")
+
+gender_male<- table1_v2_row_fcn("gender_category", "male")
+gender_female<- table1_v2_row_fcn("gender_category", "female")
+gender_other<- table1_v2_row_fcn("gender_category", "other")
+gender_missing<- table1_v2_row_fcn("gender_category", "Missing")
+
+region_northeast<- table1_v2_row_fcn("REGION", "Northeast")
+region_midwest<- table1_v2_row_fcn("REGION", "Midwest")
+region_south<- table1_v2_row_fcn("REGION", "South")
+region_west<- table1_v2_row_fcn("REGION", "West")
+
+comorbid_0<- table1_v2_row_fcn("comorbid", "0")
+comorbid_1<- table1_v2_row_fcn("comorbid", "1")
+comorbid_2plus<- table1_v2_row_fcn("comorbid", "2plus")
+comorbid_missing<- table1_v2_row_fcn("comorbid", "missing")
+
+covid_notworried<- table1_v2_row_fcn("worried_covid", "Not worried at all")
+covid_not_too_worried<- table1_v2_row_fcn("worried_covid", "Not too worried")
+covid_somewhat_worried<- table1_v2_row_fcn("worried_covid", "Somewhat worried")
+covid_very_worried<- table1_v2_row_fcn("worried_covid", "Very worried")
+covid_missing<- table1_v2_row_fcn("worried_covid", "Missing")
+
+education_HS_less<- table1_v2_row_fcn("education_category", "HS or less")
+education_some_college<- table1_v2_row_fcn("education_category", "Some college")
+education_2_4yr<- table1_v2_row_fcn("education_category", "2 or 4yr college")
+education_masters_plus<- table1_v2_row_fcn("education_category", "Masters+")
+education_missing<- table1_v2_row_fcn("education_category", "Missing")
+
+
+
+#COMBINE
+table1_v2<- rbind(
+  remote0, remote1,
+  hybrid0, hybrid1,
+  inperson0, inperson1,
+  parent_age18_34, parent_age35_44, parent_age45_54, parent_age55_plus, parent_age_missing,
+  gender_male, gender_female, gender_other, gender_missing,
+  region_northeast, region_midwest, region_south, region_west,
+  covid_notworried, covid_not_too_worried, covid_somewhat_worried, covid_very_worried, covid_missing,
+  comorbid_0, comorbid_1, comorbid_2plus, comorbid_missing,
+  education_HS_less, education_some_college, education_2_4yr, education_masters_plus, education_missing)
+
+```
+
+## T1/SuppT1, MH across entire sample, for each variable:
+```{r}
+#Get total column:
+varlist<- c("modality_remote", "modality_part_time_1_0", "modality_in_person_1_0", "age2",
+            "gender_category","REGION", "comorbid", "worried_covid", "education_category",
+            "quartile_white", "quartile_black_aa", "quartile_hisp_latino", "avoid_contact", 
+            "employment","adult_cat", "child_cat", "urban_rural_category", "financial_worry")
+
+results_df <- data.frame()
+data_svy<- svydesign(ids = ~1, weights = ~weight, data = data)
+
+for (i in varlist) {
+  #row1 <- data.frame(Var1 = i, Freq = NA, unweighted_percent= NA, weighted_percent=NA)#needs same # columns/names as var_table
+  row1<- data.frame(Var1= i, combined=NA)
+  var_table <- as.data.frame(table(data[[i]]))
+  var_table$unweighted_percent <- round(var_table$Freq / nrow(data),2) * 100  # Calculate unweighted percent
+  
+  # Add weighted percent for specific variables
+  if (i %in% c("modality_in_person_1_0", "modality_part_time_1_0", "modality_remote")) {
+  #if (i %in% c("employment")) {
+    var_table$weighted_percent <- ifelse(var_table$Var1 == 1,
+                                          round(weighted.mean(data[[i]] == 1, w = data$weight),2)*100,
+                                          round(weighted.mean(data[[i]] == 0, w = data$weight),2)*100)
+    #var_table$weighted_percent=as.character(var_table$weighted_percent)
+ } else {
+    tab1_weighted <- svyCreateTableOne(vars =i, data = data_svy)
+    weighted_table <- as.data.table(print(tab1_weighted, catDigits = 1, format = "p"))[-c(1:2), , drop = FALSE]
+    weighted_table<- weighted_table %>%
+      mutate("Overall"=round(as.numeric(Overall),0)) %>%
+      dplyr::rename("weighted_percent"="Overall")
+    var_table<- cbind(var_table, weighted_table)
+ }
+  var_table2 <- var_table %>%
+      mutate(combined = sprintf("%s (%.0f/%.0f)", format(Freq, big.mark = ","), unweighted_percent, weighted_percent)) %>%
+      dplyr::select(-c("Freq","unweighted_percent", "weighted_percent"))
+  
+  results_df <- bind_rows(results_df, row1, var_table2)
+}
+
+```
+
+## T1/SuppT1, MH overall:
+```{r}
+#overall
+weighted.mean(data$isolation_binary==1, w = data$weight)*100
+weighted.mean(data$anxiety_binary==1, w = data$weight)*100
+weighted.mean(data$depression_binary==1, w = data$weight)*100
+
+table(data$isolation_binary)
+table(data$anxiety_binary)
+table(data$depression_binary)
+```
+
+
+# Supp T1:
+```{r}
+financial_notworried<- table1_v2_row_fcn("financial_worry", "Not worried at all")
+financial_not_too_worried<- table1_v2_row_fcn("financial_worry", "Not too worried")
+financial_somewhat_worried<- table1_v2_row_fcn("financial_worry", "Somewhat worried")
+financial_very_worried<- table1_v2_row_fcn("financial_worry", "Very worried")
+financial_missing<- table1_v2_row_fcn("financial_worry", "Missing")
+
+white_q1<- table1_v2_row_fcn("quartile_white", "quartile 1")
+white_q2<- table1_v2_row_fcn("quartile_white", "quartile 2")
+white_q3<- table1_v2_row_fcn("quartile_white", "quartile 3")
+white_q4<- table1_v2_row_fcn("quartile_white", "quartile 4")
+white_missing<- table1_v2_row_fcn("quartile_white", "missing")
+
+black_q1<- table1_v2_row_fcn("quartile_black_aa", "quartile 1")
+black_q2<- table1_v2_row_fcn("quartile_black_aa", "quartile 2")
+black_q3<- table1_v2_row_fcn("quartile_black_aa", "quartile 3")
+black_q4<- table1_v2_row_fcn("quartile_black_aa", "quartile 4")
+black_missing<- table1_v2_row_fcn("quartile_black_aa", "missing")
+
+hisp_q1<- table1_v2_row_fcn("quartile_hisp_latino", "quartile 1")
+hisp_q2<- table1_v2_row_fcn("quartile_hisp_latino", "quartile 2")
+hisp_q3<- table1_v2_row_fcn("quartile_hisp_latino", "quartile 3")
+hisp_q4<- table1_v2_row_fcn("quartile_hisp_latino", "quartile 4")
+hisp_missing<- table1_v2_row_fcn("quartile_hisp_latino", "missing")
+
+avoidcontact_1<- table1_v2_row_fcn("avoid_contact", "1")
+avoidcontact_2<- table1_v2_row_fcn("avoid_contact", "2")
+avoidcontact_3<- table1_v2_row_fcn("avoid_contact", "3")
+avoidcontact_4<- table1_v2_row_fcn("avoid_contact", "4")
+avoidcontact_missing<- table1_v2_row_fcn("avoid_contact", "missing")
+
+employ0<- table1_v2_row_fcn("employment","0")
+employ1<- table1_v2_row_fcn("employment", "1")
+employ_missing<- table1_v2_row_fcn("employment", "missing")
+
+adult_cat1<- table1_v2_row_fcn("adult_cat", "one")
+adult_cat2<- table1_v2_row_fcn("adult_cat", "two")
+adult_cat3<- table1_v2_row_fcn("adult_cat", "three+")
+adult_cat_missing<- table1_v2_row_fcn("adult_cat", "Missing")
+
+child_cat1<- table1_v2_row_fcn("child_cat", "one")
+child_cat2<- table1_v2_row_fcn("child_cat", "two")
+child_cat3<- table1_v2_row_fcn("child_cat", "three+")
+
+urban_largecentral<- table1_v2_row_fcn("urban_rural_category", "Large central")
+urban_largefringe<- table1_v2_row_fcn("urban_rural_category", "large fringe")
+urban_med_small_metro<- table1_v2_row_fcn("urban_rural_category", "Medium/small metro")
+urban_micro_non<- table1_v2_row_fcn("urban_rural_category", "Micropolitan/non-core")
+urban_missing<- table1_v2_row_fcn("urban_rural_category", "Missing")
+
+table1_supp<- rbind(
+  financial_notworried, financial_not_too_worried, financial_somewhat_worried, financial_very_worried, financial_missing,
+  white_q1, white_q2, white_q3, white_q4, white_missing,
+  black_q1, black_q2, black_q3, black_q4, black_missing,
+  hisp_q1, hisp_q2, hisp_q3, hisp_q4, hisp_missing,
+  avoidcontact_1, avoidcontact_2, avoidcontact_3, avoidcontact_4, avoidcontact_missing,
+  employ0, employ1, employ_missing,
+  adult_cat1, adult_cat2, adult_cat3, adult_cat_missing,
+  child_cat1, child_cat2, child_cat3, 
+  urban_largecentral, urban_largefringe, urban_med_small_metro, urban_micro_non, urban_missing
+)
+```

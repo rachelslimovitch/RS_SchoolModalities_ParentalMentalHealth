@@ -1,0 +1,252 @@
+---
+title: "07_SuppFig1_SuppFig2"
+author: "Rachel Slimovitch"
+date: "2025-10-31"
+output: pdf_document
+---
+
+This code runs the DiD, and creates Supp Fig1, and Supp Fig2.
+
+SuppFig1: DiD estimates for the effect of reopening to in-person or hybrid learning on parental mental health.
+
+SuppFig2: DiD estimates for the effect of reopening on CTIS responses for modality of instruction (i.e., does exposure match)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+library(did)
+here::i_am("RS_Thesis_Code/07_SuppFig1_SuppFig2.Rmd")
+```
+
+# Read in data:
+```{r}
+remote_hybrid = fread(here("RS_Thesis_Data", "remote_hybrid_DiD.csv"))
+names(remote_hybrid) <- make.names(names(remote_hybrid), unique = TRUE)
+
+remote_inperson = fread(here("RS_Thesis_Data", "remote_inperson_DiD.csv"))
+names(remote_inperson) <- make.names(names(remote_inperson), unique = TRUE)
+```
+
+# DiD function:
+```{r}
+did_fcn<- function(dataset) {
+  #isolation
+  isol_te_dyn<- did_inner_fcn(data=dataset, outcome = "isolation_binary")
+  #anxiety
+  anx_te_dyn<- did_inner_fcn(data=dataset, outcome = "anxiety_binary")
+  #depression
+  dep_te_dyn<- did_inner_fcn(data=dataset, outcome = "depression_binary")
+  #RETURN
+  return(list(isol_te_dyn, anx_te_dyn, dep_te_dyn))
+}
+
+did_inner_fcn<- function(data, outcome) {
+  #get avg te
+  avg_te <- att_gt(
+  yname = outcome,
+  gname = "final_reopen_wk", #group
+  idname = "district_nces_id",
+  tname = "updated_week_num",
+  xformla = ~1,
+  data = data,
+  weightsname = "weight", 
+  panel = FALSE
+)
+  #use dynamic
+  #pval 0.05
+  avg_te_dyn_05 <- aggte(avg_te, type = "dynamic", na.rm=TRUE, alp=0.05)
+  #pval=0.1
+  avg_te_dyn_1 <- aggte(avg_te, type = "dynamic", na.rm=TRUE, alp=0.1)
+  #return
+  return(list(avg_te_dyn_05, avg_te_dyn_1))
+}
+```
+
+
+# Remote-hybrid 
+```{r}
+remote_hybrid_did<- did_fcn(data=remote_hybrid) 
+isol<- remote_hybrid_did[1]  #ATT: 0.0086
+anx<- remote_hybrid_did[2]  #ATT: 0.0056
+dep<- remote_hybrid_did[3] #ATT: -0.0034
+```
+
+## Plot MH
+```{r}
+isol_hybrid<-
+ggdid(isol[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  theme(axis.text = element_text(size = 10)) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "Hybrid instruction"), values=c("#F8766D", "#00BFC4"))
+
+
+anx_hybrid<-
+  ggdid(anx[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "Hybrid instruction"), values=c("#F8766D", "#00BFC4"))
+
+dep_hybrid<-
+  ggdid(dep[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "Hybrid instruction"), values=c("#F8766D", "#00BFC4"))
+
+# Arrange the plots side by side with a common legend
+combined_plots_hyb <- ggarrange(isol_hybrid, anx_hybrid, dep_hybrid,
+                            ncol=3, nrow=1, align="v",
+                             common.legend = TRUE, legend = "right")
+
+# Print the combined plots
+ggsave("/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_TablesFigures/DiD_MH_hybrid.jpg", combined_plots_hyb, width = 12, height = 2, dpi = 300)
+```
+
+## Plot school modality
+```{r}
+hybrid_did_data_outcome<- remote_hybrid %>%
+  mutate(modality_part_time_1_0 = ifelse(below_prek==1, 0 , modality_part_time_1_0)) %>%
+  mutate(modality_part_time_1_0 = as.integer(modality_part_time_1_0))
+
+outcome_hybrid <- att_gt(
+  yname = "modality_part_time_1_0", #outcome var
+  gname = "final_reopen_wk", #group
+  idname = "district_nces_id",
+  tname = "updated_week_num",
+  xformla = ~1,
+  data = hybrid_did_data_outcome,
+  weightsname = "weight",
+  panel = FALSE
+)
+
+outcome_hybrid_dyn<- aggte(outcome_hybrid, type = "dynamic", na.rm=TRUE)
+summary(outcome_hybrid_dyn) #ATT: 0.0915
+
+outcome_hyb_plot<-
+  ggdid(outcome_hybrid_dyn, 
+      legend = TRUE) +
+  ylab("Percentage point change in modality") +  # Add y-axis title
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-5, 5, by = 1)) +
+  labs(title = " ") +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "Hybrid instruction"), values=c("#F8766D", "#00BFC4"))
+```
+
+
+
+# Remote-inperson 
+```{r}
+remote_inperson_did<- did_fcn(data=remote_inperson) 
+isol_inp<- remote_inperson_did[1] 
+anx_inp<- remote_inperson_did[2] 
+dep_inp<- remote_inperson_did[3] 
+```
+
+## Plot MH
+```{r}
+isol_inp<-
+  ggdid(isol_inp[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  theme(axis.text = element_text(size = 10)) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "In person instruction"), values=c("#F8766D", "#00BFC4"))
+
+anx_inp<-
+  ggdid(anx_inp[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "In person instruction"), values=c("#F8766D", "#00BFC4"))
+
+dep_inp<-
+  ggdid(dep_inp[[1]][[1]], legend = TRUE) +
+  ggtitle(" ") +
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-20, 20, by = 5)) +
+  theme(axis.text = element_text(size = 10)) +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "In person instruction"), values=c("#F8766D", "#00BFC4"))
+
+# Arrange the plots side by side with a common legend
+combined_plots_inp <- ggarrange(isol_inp, anx_inp, dep_inp,
+                            ncol=3, nrow=1, align="v",
+                             common.legend = TRUE, legend = "right")
+
+# Print the combined plots
+ggsave("/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_TablesFigures/DiD_MH_inperson.jpg", combined_plots_inp, width = 12, height = 2, dpi = 300)
+```
+
+## Plot school modality
+```{r}
+inperson_did_data_outcome<- remote_inperson%>%
+  mutate(modality_in_person_1_0 = ifelse(below_prek==1, 0, modality_in_person_1_0)) %>%
+  mutate(modality_in_person_1_0 = as.integer(modality_in_person_1_0))
+
+outcome_inperson <- att_gt(
+  yname = "modality_in_person_1_0", #outcome var
+  gname = "final_reopen_wk", #group
+  idname = "district_nces_id",
+  tname = "updated_week_num",
+  xformla = ~1,
+  data = inperson_did_data_outcome,
+  weightsname = "weight",
+  panel = FALSE
+)
+
+outcome_inperson_dyn<- aggte(outcome_inperson, type = "dynamic", na.rm=TRUE)
+summary(outcome_inperson_dyn)  #ATT: 0.2577
+
+outcome_inperson_plot<-
+  ggdid(outcome_inperson_dyn, 
+      legend = TRUE) +
+  ylab("Percentage point change in modality") +  # Add y-axis title
+  scale_y_continuous(labels = function(x) x * 100) +
+  scale_x_continuous(breaks = seq(-5, 5, by = 1)) +
+  labs(title = " ") +
+  theme(plot.caption = element_text(hjust = 0))  +
+  scale_color_manual(labels = c("Remote instruction", "In person instruction"), values=c("#F8766D", "#00BFC4"))
+```
+
+# Combine modality plots
+```{r}
+# Arrange the plots side by side with a common legend
+combined_plots_outcome <- ggarrange(outcome_inperson_plot, outcome_hyb_plot,
+                            ncol=1, nrow=2, align="v",
+                             common.legend = FALSE, legend = "right")
+
+# Print the combined plots
+ggsave("/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_TablesFigures/DiD_Outcome_FigS2.jpg", combined_plots_outcome, width = 7, height =7, dpi = 300)
+
+```
+
+
+

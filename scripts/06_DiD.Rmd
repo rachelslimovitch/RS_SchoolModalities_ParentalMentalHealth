@@ -1,0 +1,701 @@
+---
+title: "06_DiD"
+author: "Rachel Slimovitch"
+date: "2025-10-31"
+output: pdf_document
+---
+
+This code pulls in the data needed for DiD (school district reopening), cleans it, and binds it with the CTIS data. 
+
+
+******************
+DATA:
+- School_Learning_Modalities__2020-2021.csv
+- Need to source R zipcodes file (zipcodes of major school districts)
+- CTIS, any child gr12 or below (includes below preK): data_analytic_gr12max.csv
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/06_DiD.Rmd")
+```
+
+# School reopening data
+```{r}
+df = fread(here("RS_Thesis_Data", "School_Learning_Modalities__2020-2021.csv"))
+source(here("RS_Thesis_Code", "zip_codes.R"))
+
+nrow(as.data.frame(unique(df$district_nces_id))) #13,248 districts (total #districts in US)
+```
+
+## Clean school reopening data
+Filter to correct dates (keeps 12,561 school districts) 
+```{r}
+df$date <- as.Date(df$week, format = "%m/%d/%Y")
+df1<- df %>%
+  filter(date<= "2021-04-30")
+
+# check # students
+student_df1<- df1 %>% #47,063,912	 students (and there are 49 million K-12 students total)
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+Create week # variable:
+```{r}
+# Require 1 row for each school, for each week
+all_combinations <- expand.grid(district_nces_id= unique(df1$district_nces_id),date = unique(df1$date)) %>%
+  arrange(district_nces_id, date)
+
+df1_complete<- merge(all_combinations, df1, by=c("district_nces_id", "date"), all=TRUE) %>%
+  mutate(week_number = as.integer(as.numeric(date - min(date)) / 7)+1)
+
+```
+
+## Remote --> Hybrid reopening
+Districts must have been both remote and hybrid during time period. 
+(Note- see 5_13_Districts_Expanded for additional summary tables of district sample sizes through filtering)
+```{r}
+#Filter: districts that were remote at some pt
+df1remote <- df1_complete %>%
+  filter(learning_modality=="Remote")
+
+#Filter: districts that were hybrid at some pt
+df1hybrid <- df1_complete %>%
+  filter(learning_modality=="Hybrid")
+
+remote_districts <- unique(df1remote$district_nces_id) #3,554 districts
+hybrid_districts<- unique(df1hybrid$district_nces_id) #7,476
+
+#Only include these districts (were remote or hybrid at some pt)
+df2<- df1_complete %>%
+  filter(district_nces_id %in% remote_districts) %>%
+  filter(district_nces_id %in% hybrid_districts)
+
+#Check: # students this includes?
+student_df2<- df2 %>% #still have 50% students
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+Identify first transition from 3 weeks remote-> 3 weeks hybrid.
+```{r}
+df3<- df2 %>%
+  group_by(district_nces_id) %>%
+  filter((any(learning_modality == "Hybrid" & 
+               lag(learning_modality) == "Hybrid" &
+               lag(learning_modality, 2) == "Hybrid")) &
+         (any(learning_modality == "Remote" &
+               lag(learning_modality) == "Remote" &
+               lag(learning_modality, 2) == "Remote"))) %>%
+  #create variable "transition" that is transition to hybrid 
+  mutate(transition = ifelse(
+    (learning_modality == "Hybrid" & 
+             lag(learning_modality) == "Hybrid" & 
+             lag(learning_modality, 2) == "Hybrid" &
+       lag(learning_modality,3)=="Remote" & 
+       lag(learning_modality,4)=="Remote" & 
+       lag(learning_modality,5)=="Remote"), 1, 0
+  )) %>%
+  #create variable for first of 3 weeks of remote
+  mutate(first_of_3_remote= ifelse(
+    (learning_modality == "Remote" & 
+             lead(learning_modality) == "Remote" & 
+             lead(learning_modality, 2) == "Remote" &
+       lead(learning_modality,3)=="Hybrid" & 
+       lead(learning_modality,4)=="Hybrid" & 
+       lead(learning_modality,5)=="Hybrid"), 1, 0
+  )) %>%
+  ungroup() 
+```
+
+Make sure that we're only choosing the first transition. 
+```{r}
+#get districts for those whose first transition is in correct range
+df3_keep <- df3  %>%
+  group_by(district_nces_id) %>%
+  arrange(date) %>%
+  filter(first_of_3_remote == 1) %>%
+  slice(1)  %>% #select earliest time they are 3 remote/3 inperson 
+  filter(date>as.Date("2020-11-28")) %>%
+  ungroup() %>%
+  pull(district_nces_id)
+
+#filter to only include those districts
+df3_v2<- df3%>%
+  filter(district_nces_id %in% df3_keep) 
+
+#check for students - 13.6 million
+student_df3_v2<- df3_v2%>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  ungroup() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+
+Keep:
+- First transition row 
+- 5 rows before first transition row
+- Up to 7 rows before (up to 5 weeks remote)
+- Up to 2 rows after (up to 5 weeks hybrid)
+```{r}
+df4 <- df3_v2%>%
+  arrange(week_number) %>%
+  group_by(district_nces_id) %>%
+  mutate(
+    first_hybrid_week = first(week_number[which(transition == 1)]-2),
+    first_of_3_remote_week=first(week_number[which(first_of_3_remote==1)])
+  ) %>%
+  filter(
+  #keep last 3 remote, first 3 hybrid
+    between(week_number, first_of_3_remote_week, first_hybrid_week+2) |
+      #keep 4th week hybrid if possible 
+      (week_number == first_hybrid_week + 3 & learning_modality == "Hybrid") |
+      #keep 5th week hybrid if 4th week if possible 
+      (week_number == first_hybrid_week + 4 & learning_modality== "Hybrid" & (first_hybrid_week + 3 %in% week_number)) |
+      #keep 4 week remote if possible
+      (week_number == first_of_3_remote_week - 1 & learning_modality == "Remote") |
+      # keep 5 week remote if possible
+      (week_number == first_of_3_remote_week - 2 & learning_modality == "Remote" & (first_of_3_remote_week -1 %in% week_number))) %>%
+  #create updated week number
+  mutate(updated_week_num = row_number(),
+         week_transition = first(updated_week_num[which(transition == 1)]-2)) %>%
+  ungroup()
+
+#check for students - 13.6 million
+student_df4<- df4%>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  ungroup() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+Create 3 reopening weeks: reopen_all, reopen_HS, reopen_elem 
+- in overall_reopen if not in elem or high
+- Use updated week num (consecutive #s)
+```{r}
+#no specific "middle" (none are middle school specific )
+print(df4$district_name[grepl("Middle", df4$district_name, ignore.case = TRUE)])
+
+#check elementary
+elementary_list<- df4$district_nces_id[grepl("Elementary", df4$district_name, ignore.case = TRUE)]
+elementary_list2<- df4$district_nces_id[grepl(" ESD", df4$district_name, ignore.case = TRUE)]
+elementary_list_final<- c(elementary_list, elementary_list2)
+
+#check high
+high_list<- df4$district_nces_id[grepl("\\bHigh\\b", df4$district_name, ignore.case = TRUE)]
+high_list2<- df4$district_nces_id[grepl(" HSD", df4$district_name, ignore.case = TRUE)]
+high_list_final<- c(high_list, high_list2)
+
+#create reopen week variable for correct age group
+#reopen_all if not in elem or high group
+df4b<- df4%>%
+  group_by(district_nces_id) %>%
+  mutate(reopen_all = ifelse(!(district_nces_id %in% elementary_list_final) & !(district_nces_id %in% high_list_final), 
+                        week_transition, NA),
+         reopen_HS = ifelse(district_nces_id %in% high_list_final, week_transition, NA),
+         reopen_elem = ifelse(district_nces_id %in% elementary_list_final, week_transition, NA)) %>%
+  ungroup()
+
+```
+
+Make sure no 2 districts have same zip and both have have different reopening dates in the same column.
+```{r}
+#one row per district
+df4b_districts <- distinct(df4b, district_nces_id, .keep_all = TRUE) 
+
+#extract zips that are duplicated 
+duplicated_zips <- df4b_districts$zip_code[duplicated(df4b_districts$zip_code)] #list of duplicated zip code values
+
+df4b_duplicatedzip_norepeat <- df4b %>%
+  #only looking at duplicated zips
+  filter(zip_code %in% duplicated_zips) %>%
+  group_by(zip_code) %>%
+  # reopen_all: either 1 value, or 1 value and NA's
+  # filter to keep: 1) if no missing values, then only 1 distinct#. 2) if there are missing values, then 2 or fewer different #s (b/c NA counts as #)
+  filter(
+    ifelse(
+      sum(is.na(reopen_all)) > 0,
+      n_distinct(reopen_all, na.rm = TRUE) <= 2,
+      n_distinct(reopen_all, na.rm = TRUE) == 1
+    ),
+    #elementary
+    ifelse(
+      sum(is.na(reopen_elem)) > 0,
+      n_distinct(reopen_elem, na.rm = TRUE) <= 2,
+      n_distinct(reopen_elem, na.rm = TRUE) == 1
+    ),
+    #high
+    ifelse(
+      sum(is.na(reopen_HS)) > 0,
+      n_distinct(reopen_HS, na.rm = TRUE) <= 2,
+      n_distinct(reopen_HS, na.rm = TRUE) == 1
+    )
+  ) %>%
+ungroup()
+
+
+#Create dataset: nonduplicated, duplicated + keeping
+df4b_nonduplicated <- df4b %>%
+  filter(!(zip_code %in% duplicated_zips))
+
+df5<- rbind(df4b_nonduplicated, df4b_duplicatedzip_norepeat)
+```
+
+Make zip code 5 digits:
+```{r}
+df5$zip_code<- sprintf("%05d", df5$zip_code)
+
+# check students
+student_df5<- df5 %>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+
+# check # districts
+nrow(as.data.frame(unique(df5$district_nces_id))) #1,704 districts
+```
+
+Make a row for each day: 
+```{r}
+df6 <- df5 %>%
+  arrange(date) %>%
+  group_by(district_nces_id) %>%
+  # Complete the date sequence for each school
+  complete(date = seq.Date(min(date), max(date), by = "day")) %>% #creates rows
+  #create 5 days after last row
+  complete(date = seq.Date(max(date), max(date)+5, by="day")) %>%
+  # Fill in any missing values in other columns (if any)
+  tidyr::fill(everything()) %>%
+  rename(A3=zip_code)
+```
+
+Export data (will need for T3):
+```{r}
+write.csv(df6, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/remote_hybrid_DiD_noCTIS.csv")
+```
+
+
+#### Match to the CTIS data. 
+
+Read in CTIS data:
+```{r}
+data = fread(here("RS_Thesis_Data", "data_analytic_gr12max.csv"))
+names(data) <- make.names(names(data), unique = TRUE)
+
+data$A3<- sprintf("%05d", data$A3)
+data$A3<- as.character(data$A3)
+
+# exclude if only have kids in prek/k (bc non-uniform reopening)
+data<- data %>%
+  filter(!(prek_or_k==1 & grades1_5==0 & grades6_8==0 & grades9_12==0))
+```
+
+Combine CTIS data with school reopening to hybrid: - PAUSED HERE
+```{r}
+merged1 <- merge(data, df6,  by=c("A3", "date"), all.x = TRUE)
+
+merged2<- merged1 %>%
+  filter(!(is.na(week_transition))) 
+```
+
+Make sure grades overlap: 
+- if child only in elem: then either reopen_elem or reopen_all isn't NA
+- if child only in middle: then reopen_all isn't NA
+- if child only in high: then reopen_all or reopen_high isn't NA
+```{r}
+merged3 <- merged2 %>%
+  #start with all being true
+  mutate(keep_row = TRUE) %>%
+  #if only grades1_5, make sure reopen elem or reopen all aren't both NA
+  mutate(keep_row = ifelse(grades1_5 == 1 & grades6_8 == 0 & grades9_12 == 0, 
+                           !(is.na(reopen_elem) & is.na(reopen_all)), 
+                           keep_row)) %>%
+  #if only grades9-12, make sure reopen_HS or reopen_all aren't both NA
+  mutate(keep_row = ifelse(grades9_12 == 1 & grades6_8 == 0 & grades1_5 == 0, 
+                           !(is.na(reopen_HS) & is.na(reopen_all)), 
+                           keep_row)) %>%
+  #if only grades6_8, make sure reopen_all isn't NA
+  mutate(keep_row = ifelse(grades6_8 == 1 & grades1_5 == 0 & grades9_12 == 0, 
+                           !(is.na(reopen_all)), 
+                           keep_row)) %>%
+  filter(keep_row==TRUE) 
+```
+
+
+Create final reopen_week column. (matched to correct age)
+If the value is NA: then allow option to override in the HS group. 
+This will let me remove rows where only elem school reopened, and I have parent w/HS child observation, etc.
+```{r}
+merged4 <- merged3 %>%
+  mutate(final_reopen_wk = case_when(
+    grades1_5==1 & !(is.na(reopen_elem)) ~ reopen_elem,
+    grades1_5==1 & is.na(reopen_elem) & !(is.na(reopen_all)) ~ reopen_all,
+    grades6_8==1 & !(is.na(reopen_all)) ~ reopen_all,
+    grades9_12==1 & !(is.na(reopen_HS)) ~ reopen_HS,
+    grades9_12==1 & is.na(reopen_HS) & !(is.na(reopen_all)) ~ reopen_all,
+    below_prek == 1 ~ 0,
+    TRUE ~ NA_real_  # Default case, can be modified if needed
+  ))
+
+#remove rows where final_reopen_wk is NA (now N = 93,271)
+merged5<- merged4 %>%
+  filter(!(is.na(final_reopen_wk)))
+
+```
+
+Save file:
+```{r}
+write.csv(merged5, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/remote_hybrid_DiD.csv")
+```
+
+Check: proportion per region (Midwest: 25.8%; Northeast 20.3%; South: 16.6%, West: 37.3%)
+```{r}
+# proportion per region
+svy_merged5<- svydesign(ids = ~1, weights = ~weight, data = merged5)
+
+tab1_weighted <- svyCreateTableOne(vars ="REGION", data = svy_merged5)
+weighted_table <- as.data.table(print(tab1_weighted, catDigits = 1, format = "p"))[-c(1:2), , drop = FALSE]
+```
+
+
+## Remote --> In-person reopening
+Create dataset with all districts that were remote and in-person at some pt.
+```{r}
+#was remote at one point
+df1remote <- df1_complete %>%
+  filter(learning_modality=="Remote")
+
+#was in-person at some point 
+df1inperson <- df1_complete %>%
+  filter(learning_modality=="In Person")
+
+#all school districts that were remote at some point
+remote_districts <- unique(df1remote$district_nces_id) #4,473
+inperson_districts<- unique(df1inperson$district_nces_id) #8,041
+
+#filter to only include those districts
+df2_inp<- df1_complete %>%
+  filter(district_nces_id %in% remote_districts) %>%
+  filter(district_nces_id %in% inperson_districts)
+
+nrow(as.data.frame(unique(df2_inp$district_nces_id))) #1,953 districts fall in this
+
+student_df2<- df2_inp %>% #12.1 million students
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+Only include districts that were remote for 3 weeks, then inperson for 3 weeks. 
+- then, only want the FIRST time this transition happens. 
+- Remove any rows of hybrid learning in the middle. 
+- Remove district if first of 3 remote is before 11/29/2020
+
+```{r}
+#Filter to all districts that are remote for 3 weeks and inperson for 3 weeks
+df3_inp <- df2_inp %>%
+  group_by(district_nces_id) %>%
+  filter((any(learning_modality == "In Person" & 
+               lag(learning_modality) == "In Person" &
+               lag(learning_modality, 2) == "In Person")) &
+         (any(learning_modality == "Remote" &
+               lag(learning_modality) == "Remote" &
+               lag(learning_modality, 2) == "Remote"))) %>%
+  #filter out hybrid
+  filter(learning_modality!="Hybrid") %>%
+  #create variable "transition" that is transition to inperson (1 at end of 4 weeks inperson)
+  mutate(transition = ifelse(
+    (learning_modality == "In Person" & 
+             lag(learning_modality) == "In Person" & 
+             lag(learning_modality, 2) == "In Person" &
+       lag(learning_modality,3)=="Remote" & 
+       lag(learning_modality,4)=="Remote" & 
+       lag(learning_modality,5)=="Remote"), 1, 0
+  )) %>%
+  #create variable for first of 3 weeks of remote: make sure the date is before Dec 20
+  mutate(first_of_3_remote= ifelse(
+    (learning_modality == "Remote" & 
+             lead(learning_modality) == "Remote" & 
+             lead(learning_modality, 2) == "Remote" &
+       lead(learning_modality,3)=="In Person" & 
+       lead(learning_modality,4)=="In Person" & 
+       lead(learning_modality,5)=="In Person"), 1, 0
+  )) %>%
+  ungroup() 
+
+#check for students - 8.2 million
+student_df3<- df3_inp%>%
+  filter(district_nces_id %in% inperson_districts) %>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  ungroup() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+Make sure that we're only choosing the first transition. 
+```{r}
+#27 districts have this happen twice- check these districts.
+two_transitions<- df3_inp %>%
+  group_by(district_nces_id) %>%
+  summarize(num_remote1 = sum(first_of_3_remote > 0)) %>%
+  filter(num_remote1>1) %>%
+  pull(district_nces_id)
+
+df3_inp_keep <- df3_inp  %>%
+  group_by(district_nces_id) %>%
+  arrange(date) %>%
+  filter(first_of_3_remote == 1) %>%
+  slice(1)  %>% #select earliest time they are 3 remote/3 inperson 
+  filter(date>as.Date("2020-11-28")) %>%
+  ungroup() %>%
+  pull(district_nces_id)
+
+#filter to only include those districts
+df3_inp_v2<- df3_inp%>%
+  filter(district_nces_id %in% df3_inp_keep) 
+
+#check for students - 5.3 million
+student_df3_inp_v2<- df3_inp_v2%>%
+  filter(district_nces_id %in% inperson_districts) %>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  ungroup() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+Keep:
+- First transition row 
+- 5 rows before first transition row
+- Up to 7 rows before (up to 5 weeks remote)
+- Up to 2 rows after (up to 5 weeks inperson)
+
+```{r}
+df4_inp <- df3_inp_v2%>%
+  arrange(week_number) %>%
+  group_by(district_nces_id) %>%
+  mutate(
+    first_inperson_week = first(week_number[which(transition == 1)]-2),
+    first_of_3_remote_week=week_number[which(first_of_3_remote==1)]
+  ) %>%
+  filter(
+  #keep last 3 remote, first 3 inperson
+    between(week_number, first_of_3_remote_week, first_inperson_week+2) |
+      #keep 4th week inperson if possible 
+      (week_number == first_inperson_week + 3 & learning_modality == "In Person") |
+      #keep 5th week inperson if 4th week if possible 
+      (week_number == first_inperson_week + 4 & learning_modality== "In Person" & (first_inperson_week + 3 %in% week_number)) |
+      #keep 4 week remote if possible
+      (week_number == first_of_3_remote_week - 1 & learning_modality == "Remote") |
+      # keep 5 week remote if possible
+      (week_number == first_of_3_remote_week - 2 & learning_modality == "Remote" & (first_of_3_remote_week -1 %in% week_number))) %>%
+  #create updated week number
+  mutate(updated_week_num = row_number(),
+         week_transition = first(updated_week_num[which(transition == 1)]-2)) %>%
+  ungroup()
+
+```
+
+Create 3 reopening weeks: reopen_all, reopen_HS, reopen_elem 
+- in overall_reopen if not in elem or high
+- Use updated week num (consecutive #s)
+```{r}
+#no specific "middle" (none are middle school specific )
+print(df4_inp$district_name[grepl("Middle", df4_inp$district_name, ignore.case = TRUE)])
+
+#check elementary
+elementary_list<- df4_inp$district_nces_id[grepl("Elementary", df4_inp$district_name, ignore.case = TRUE)]
+elementary_list2<- df4_inp$district_nces_id[grepl(" ESD", df4_inp$district_name, ignore.case = TRUE)]
+elementary_list_final<- c(elementary_list, elementary_list2)
+
+#check high
+high_list<- df4_inp$district_nces_id[grepl("\\bHigh\\b", df4_inp$district_name, ignore.case = TRUE)]
+high_list2<- df4_inp$district_nces_id[grepl(" HSD", df4_inp$district_name, ignore.case = TRUE)]
+high_list_final<- c(high_list, high_list2)
+
+#create reopen week variable for correct age group
+#reopen_all if not in elem or high group
+df4b_inp<- df4_inp %>%
+  group_by(district_nces_id) %>%
+  mutate(reopen_all = ifelse(!(district_nces_id %in% elementary_list_final) & !(district_nces_id %in% high_list_final), 
+                        week_transition, NA),
+         reopen_HS = ifelse(district_nces_id %in% high_list_final, week_transition, NA),
+         reopen_elem = ifelse(district_nces_id %in% elementary_list_final, week_transition, NA)) %>%
+  ungroup()
+
+```
+
+Make sure no 2 districts have same zip and both have have different reopening dates in the same column.
+```{r}
+#one row per district
+df4b_inp_districts <- distinct(df4b_inp, district_nces_id, .keep_all = TRUE) 
+
+#extract zips that are duplicated (37 zips)
+duplicated_zips_inp <- df4b_inp_districts$zip_code[duplicated(df4b_inp_districts$zip_code)] #list of duplicated zip code values
+
+df4b_inp_duplicatedzip_norepeat <- df4b_inp %>%
+  #only looking at duplicated zips
+  filter(zip_code %in% duplicated_zips_inp) %>%
+  group_by(zip_code) %>%
+  # reopen_all: either 1 value, or 1 value and NA's
+  # filter to keep: 1) if no missing values, then only 1 distinct#. 2) if there are missing values, then 2 or fewer different #s (b/c NA counts as #)
+  filter(
+    ifelse(
+      sum(is.na(reopen_all)) > 0,
+      n_distinct(reopen_all, na.rm = TRUE) <= 2,
+      n_distinct(reopen_all, na.rm = TRUE) == 1
+    ),
+    #elementary
+    ifelse(
+      sum(is.na(reopen_elem)) > 0,
+      n_distinct(reopen_elem, na.rm = TRUE) <= 2,
+      n_distinct(reopen_elem, na.rm = TRUE) == 1
+    ),
+    #high
+    ifelse(
+      sum(is.na(reopen_HS)) > 0,
+      n_distinct(reopen_HS, na.rm = TRUE) <= 2,
+      n_distinct(reopen_HS, na.rm = TRUE) == 1
+    )
+  ) %>%
+ungroup()
+
+#Create dataset: nonduplicated, duplicated + keeping
+df4b_nonduplicated_inp<- df4b_inp %>%
+  filter(!(zip_code %in% duplicated_zips_inp))
+
+df5_inp<- rbind(df4b_nonduplicated_inp, df4b_inp_duplicatedzip_norepeat)
+
+#students in df5_inp: 5.26 million
+student_df5_inp<- df5_inp %>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+```
+
+Zip code, 5 digits:
+```{r}
+df5_inp$zip_code<- sprintf("%05d", df5_inp$zip_code)
+
+# check students
+student_df5_inp<- df5_inp %>%
+  dplyr::select(student_count, district_nces_id) %>%
+  unique() %>%
+  summarise(sum(student_count, na.rm=TRUE))
+
+# check # districts
+nrow(as.data.frame(unique(df5_inp$district_nces_id))) #1,704 districts
+
+```
+
+
+Before merging, make a row for each day. (All days between  start of remote through one week after last remote, and all days through start of in-person to one week after end.)
+- Days from start-end of remote
+- Days from start-end of inperson
+
+Also: 5 days after the last remote, and five days after the last inperson
+```{r}
+df6_inp<- df5_inp %>%
+  arrange(date) %>%
+  group_by(learning_modality, district_nces_id) %>%
+  #fill in remote days
+  complete(date = seq.Date(first(date), max(date), by = "day")) %>%
+  #add 5 days after last
+  complete(date = seq.Date(max(date), max(date)+5, by="day")) %>%
+  tidyr::fill(everything()) %>%
+  rename(A3=zip_code)
+```
+
+Export to CSV (will need for T3):
+```{r}
+write.csv(df6_inp, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/remote_inperson_DiD_noCTIS.csv")
+```
+
+### Match to CTIS data
+```{r}
+merged1_inp <- merge(data, df6_inp,  by=c("A3", "date"), all.x = TRUE)
+
+merged2_inp<- merged1_inp %>%
+  filter(!(is.na(week_transition))) 
+```
+
+Now, make sure grades overlap:
+- if child only in elem: then either reopen_elem or reopen_all isn't NA
+- if child only in middle: then reopen_all isn't NA
+- if child only in high: then reopen_all or reopen_high isn't NA
+```{r}
+merged3_inp <- merged2_inp %>%
+  #start with all being true
+  mutate(keep_row = TRUE) %>%
+  #if only grades1_5, make sure reopen elem or reopen all aren't both NA
+  mutate(keep_row = ifelse(grades1_5 == 1 & grades6_8 == 0 & grades9_12 == 0, 
+                           !(is.na(reopen_elem) & is.na(reopen_all)), 
+                           keep_row)) %>%
+  #if only grades9-12, make sure reopen_HS or reopen_all aren't both NA
+  mutate(keep_row = ifelse(grades9_12 == 1 & grades6_8 == 0 & grades1_5 == 0, 
+                           !(is.na(reopen_HS) & is.na(reopen_all)), 
+                           keep_row)) %>%
+  #if only grades6_8, make sure reopen_all isn't NA
+  mutate(keep_row = ifelse(grades6_8 == 1 & grades1_5 == 0 & grades9_12 == 0, 
+                           !(is.na(reopen_all)), 
+                           keep_row)) %>%
+  filter(keep_row==TRUE) 
+```
+
+
+Create final reopen_week column. (matched to correct age)
+If the value is NA: then allow option to override in the HS group. 
+This will let me remove rows where only elem school reopened, and I have parent w/HS child observation, etc.
+```{r}
+merged4_inp <- merged3_inp %>%
+  mutate(final_reopen_wk = case_when(
+    grades1_5==1 & !(is.na(reopen_elem)) ~ reopen_elem,
+    grades1_5==1 & is.na(reopen_elem) & !(is.na(reopen_all)) ~ reopen_all,
+    grades6_8==1 & !(is.na(reopen_all)) ~ reopen_all,
+    grades9_12==1 & !(is.na(reopen_HS)) ~ reopen_HS,
+    grades9_12==1 & is.na(reopen_HS) & !(is.na(reopen_all)) ~ reopen_all,
+    below_prek == 1 ~ 0,
+    TRUE ~ NA_real_  # Default case, can be modified if needed
+  ))
+
+#remove rows where final_reopen_wk is NA  (38364)
+merged5_inp<- merged4_inp %>%
+  filter(!(is.na(final_reopen_wk)))
+```
+
+
+Save file:
+```{r}
+write.csv(merged5_inp, "/Users/rachelslimovitch/Documents/23-24/Brown/Thesis/RS_Thesis_Data/remote_inperson_DiD.csv")
+```
+
+Check regions:
+  region 1 (Northeast): 9.3% - ACTUAL POP%: 17.2%
+  region 2 (Midwest): 41.3% - ACTUAL POP%: 20.7%
+  region 3 (South): 25.9% - ACTUAL POP%: 23.7%
+  region 4 (West): 23.5% - ACTUAL POP%: 38.4%
+Heavily Midwest. Low Northeast and West.
+```{r}
+svy_merged5_inp<- svydesign(ids = ~1, weights = ~weight, data = merged5_inp)
+
+tab1_weighted_inp <- svyCreateTableOne(vars ="REGION", data = svy_merged5_inp)
+weighted_table_inp <- as.data.table(print(tab1_weighted_inp, catDigits = 1, format = "p"))[-c(1:2), , drop = FALSE]
+```
+
+

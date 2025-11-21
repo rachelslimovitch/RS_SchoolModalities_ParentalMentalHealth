@@ -1,0 +1,212 @@
+---
+title: "08_Table3"
+author: "Rachel Slimovitch"
+date: "2025-11-03"
+output: pdf_document
+---
+
+Table3: DiD estimates for the effect of in-person and hybrid reopening, for associations.
+- 07_SuppFig1_SuppFig2.Rmd - has the DiD estimates
+- 09_table3_IPW.Rmd - had the IPW estimates
+- Also includes corresponding effect estimates for fully-adjusted LPM and IPW for relevant locations
+- Also includes change in modality (DiD)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(here)
+library(tidyverse)
+library(knitr) # to format tables
+library(lubridate) # to help extract the date
+library(covidcast)
+library(survey)
+library(tableone) # tableone
+library(kableExtra)
+library(magrittr)
+library(data.table)
+library(readxl)
+library(glmtoolbox)
+library(MASS)  #for logistic reg
+library(RColorBrewer)
+library(lubridate)
+library(multcomp)
+here::i_am("RS_Thesis_Code/08_Table3.Rmd")
+```
+
+
+Read in data:
+Used merged CTIS data with DiD data (from 06_DiD), but then filter to only have preK-12 (no below preK).
+
+```{r}
+remote_hybrid = fread(here("RS_Thesis_Data", "remote_hybrid_DiD.csv")) 
+names(remote_hybrid) <- make.names(names(remote_hybrid), unique = TRUE)
+remote_hybrid_preK_12<- remote_hybrid %>% filter(below_prek!=1) #N = 65760
+
+remote_inperson = fread(here("RS_Thesis_Data", "remote_inperson_DiD.csv"))
+names(remote_inperson) <- make.names(names(remote_inperson), unique = TRUE)
+remote_inperson_preK_12<- remote_inperson %>% filter(below_prek!=1)  #N=27,157
+```
+
+
+
+Fcns for Table 3:
+```{r}
+table3_associational<- function(svy_design, outcome) {
+  formula <- as.formula(paste(outcome, "~", paste(v3_coef, collapse = " + ")))
+  model_svy<- svyglm(formula, design=svy_design)
+  model<- summary(model_svy)
+  ci <- confint(model_svy)
+  #hybrid estimate
+  hybrid_estimate <- round(100*(model$coefficients["modality_part_time_1_0", "Estimate"]),2) #gives as percent
+  star_hybrid<- stars2(model$coefficients["modality_part_time_1_0", "Pr(>|t|)"])
+  hybrid_ci <- round(100 * ci["modality_part_time_1_0", ], 2)
+  hybrid_ci_str <- paste0("(", hybrid_ci[1], ", ", hybrid_ci[2], ")")
+  hybrid_estimate_pval <- paste0(format(hybrid_estimate), " ", star_hybrid, " ", hybrid_ci_str)
+  #inperson estimate
+  inperson_estimate <- round(100*(model$coefficients["modality_in_person_1_0", "Estimate"]),2) #gives as percent
+  star_inperson<- stars2(model$coefficients["modality_in_person_1_0", "Pr(>|t|)"])
+  inperson_ci <- round(100 * ci["modality_in_person_1_0", ], 2)
+  inperson_ci_str <- paste0("(", inperson_ci[1], ", ", inperson_ci[2], ")")
+  inperson_estimate_pval <- paste0(format(inperson_estimate), " ", star_inperson, inperson_ci_str)
+  #return
+  results <- data.table(
+  variable = c("inperson_estimate", "hybrid_estimate"),
+  estimate = c(inperson_estimate_pval, hybrid_estimate_pval)
+  )
+  return(results)  
+}
+
+table3_associational2<- function(svy_design, outcome) {
+  formula <- as.formula(paste(outcome, "~", paste(v3_simple, collapse = " + ")))
+  model_svy<- svyglm(formula, design=svy_design)
+  model<- confint(model_svy)
+  return(model)
+}
+
+
+stars2 <- function(p_value) {
+  if (p_value < 0.05) {
+    return("*")
+  } else {
+    return("")
+  }
+}
+```
+
+Create survey objects:
+```{r}
+svy_associational_hybrid<- svydesign(ids = ~1, weights = ~weight, data = remote_hybrid_preK_12)
+svy_associational_inperson<- svydesign(ids = ~1, weights = ~weight, data = remote_inperson_preK_12)
+```
+
+
+# Associational: 
+Effect estimate for fully-adjusted LPM for relevant locations. 
+```{r}
+v3_coef<- c("modality_in_person_1_0", "modality_part_time_1_0", "gender", "age", "quartile_white",
+            "quartile_black_aa", "comorbid", "quartile_hisp_latino", "avoid_contact",
+            "financial_worry", "education_level", "employment", "adult_cat",
+            "child_cat", "urban_rural", "worried_covid", "week_no", "REGION", "REGION * week_no")
+
+        
+#only look at hybrid results (ignore inperson)
+hybrid_isol<-table3_associational(svy_associational_hybrid, "isolation_binary")
+hybrid_anx<- table3_associational(svy_associational_hybrid, "anxiety_binary")
+hybrid_dep<- table3_associational(svy_associational_hybrid, "depression_binary")
+
+#only look at inperson results
+inp_isol<- table3_associational(svy_associational_inperson, "isolation_binary")
+inp_anx<- table3_associational(svy_associational_inperson, "anxiety_binary")
+inp_dep<- table3_associational(svy_associational_inperson, "depression_binary")
+
+```
+
+# IPW estimates
+
+## Remote-hybrid
+Filter out everyone who is in-person.
+```{r}
+remote_hybrid2<- remote_hybrid_preK_12 %>%
+  filter(modality_in_person_1_0=="0") %>%
+  mutate(modality_part_time_1_0=as.integer(modality_part_time_1_0)) 
+```
+
+
+Function:
+```{r}
+#IPW covariates (outcome model)
+v3_coef_ipw_6_4<- c("gender", "age", "quartile_white",
+            "quartile_black_aa", "comorbid", "quartile_hisp_latino", "avoid_contact",
+            "financial_worry", "education_level", "employment", "adult_cat",
+            "child_cat", "urban_rural", "worried_covid", "quartile_svi", "week_no", "REGION", "REGION * week_no")
+
+#IPW covariates (pscore) 
+v3_check<- c("gender", "age", "quartile_white", "comorbid", "avoid_contact", "financial_worry", "education_level",  "employment", 
+             "child_cat", "urban_rural", "worried_covid", "week_no", "REGION")
+
+run_ipw_svy <- function(data, outcome_var, v3_check, v3_coef_ipw_6_4) {
+  # Step 1: Create survey design
+  data_svy <- svydesign(ids = ~1, weights = ~weight, data = data)
+  
+  # Step 2: Fit propensity score model
+  formula_ps <- paste("modality_part_time_1_0 ~", paste(v3_check, collapse = " + "))
+  ps_model <- svyglm(as.formula(formula_ps), design = data_svy, family = "binomial")
+  
+  # Step 3: Calculate propensity scores
+  data_ipw <- data %>%
+    dplyr::mutate(ps = predict(ps_model, newdata = data, type = "response"))
+  
+  # Step 4: Remove non-overlapping
+  ps_min <- min(data_ipw$ps[data_ipw$modality_part_time_1_0 == 1])
+  ps_max <- max(data_ipw$ps[data_ipw$modality_part_time_1_0 == 1])
+  data_overlap <- data_ipw %>%
+    filter(ps >= ps_min & ps <= ps_max)
+  num_removed <- nrow(data_ipw) - nrow(data_overlap)
+  
+  # Step 5: Create IPW * survey weight
+  data_overlap2 <- data_overlap %>%
+    mutate(
+      ipw = ifelse(modality_part_time_1_0 == 1, 1 / ps, 1 / (1 - ps)),
+      ipw_surveywt = ipw * weight
+    )
+  
+  # Step 6: Create survey design for outcome
+  svy_outcome <- svydesign(ids = ~1, weights = ~ipw_surveywt, data = data_overlap2)
+  
+  # Step 7: Run outcome model
+  formula_outcome <- paste(outcome_var, "~ modality_part_time_1_0 +", paste(v3_coef_ipw_6_4, collapse = " + "))
+  outcome_ipw <- svyglm(as.formula(formula_outcome), design = svy_outcome)
+  model <- summary(outcome_ipw)
+  
+  # Step 8: Point estimate, stars, and 95% CI
+  est <- round(100 * model$coefficients["modality_part_time_1_0", "Estimate"], 2)
+  star <- stars2(model$coefficients["modality_part_time_1_0", "Pr(>|t|)"])
+  ci <- round(100 * confint(outcome_ipw)["modality_part_time_1_0", ], 2)
+  ci_str <- paste0("(", ci[1], ", ", ci[2], ")")
+  est_pval_ci <- paste0(format(est), " ", star, " ", ci_str)
+  
+  # Return list
+  return(est_pval_ci)
+}
+
+```
+
+### Run fcn
+```{r}
+isolation_hybrid<- run_ipw_svy(remote_hybrid2, "isolation_binary", v3_check, v3_coef_ipw_6_4)
+anxiety_hybrid<- run_ipw_svy(remote_hybrid2, "anxiety_binary", v3_check, v3_coef_ipw_6_4)
+depression_hybrid<- run_ipw_svy(remote_hybrid2, "depression_binary", v3_check, v3_coef_ipw_6_4)
+```
+
+## Remote-inperson
+```{r}
+remote_inperson2<- remote_inperson_preK_12 %>%
+  filter(modality_in_person_1_0=="0") %>%
+  mutate(modality_part_time_1_0=as.integer(modality_part_time_1_0)) 
+
+isolation_inperson<- run_ipw_svy(remote_inperson2, "isolation_binary", v3_check, v3_coef_ipw_6_4)
+anxiety_inperson<- run_ipw_svy(remote_inperson2, "anxiety_binary", v3_check, v3_coef_ipw_6_4)
+depression_inperson<- run_ipw_svy(remote_inperson2, "depression_binary", v3_check, v3_coef_ipw_6_4)
+```
+
+# DiD estimates
+(in 07_SuppFig1_SuppFig2.Rmd code)
